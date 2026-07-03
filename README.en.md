@@ -1,168 +1,164 @@
-# claude-code-net-tools
+# Claude Code Net Tools
 
-[中文](README.md) | English
+[中文](README.md)
 
-`claude-code-net-tools` is a local stdio MCP server that gives Claude Code and other MCP clients controllable web search and URL fetching tools. It is built for setups where the provider-side Claude Code `WebSearch` tool is unavailable or unreliable, while the local machine can access the web directly or through a local VPN/proxy.
+Claude Code Net Tools is a local MCP server that gives Claude Code and other MCP clients configurable web search, URL fetching, and content extraction tools.
 
-## Problem Solved
+## What Problem It Solves
 
-Claude Code's built-in `WebSearch` is a provider-side capability. Whether it works depends on the model account, API gateway, and provider support for server tools. When Claude Code is routed through a third-party gateway, an OpenAI-compatible endpoint, or a model that does not forward those tools, built-in search may disappear or fail.
+When Claude Code is connected to external models/APIs, local proxies/VPNs, corporate proxies, or free search pages, built-in web search may be unavailable, unstable, or limited to official Claude accounts and specific model/tool combinations. This project moves web search and fetching into a local MCP tool layer:
 
-This project moves the network step into a local MCP server:
+- Uses your machine's network route, with explicit direct/proxy control.
+- Tries free HTML/RSS search fallbacks such as DuckDuckGo, Bing, Sogou, and 360.
+- Supports optional API providers such as Brave, Kimi/Moonshot, MiniMax, Serper, and Tavily.
+- Provides webpage, link, JSON, RSS/Atom, and PDF text extraction tools.
+- Reads API keys only from environment variables. Do not commit keys to the repository.
 
-- The agent calls MCP tools instead of relying on provider-side `WebSearch`.
-- The local machine performs search and page fetching, using direct networking or a local VPN/proxy.
-- Free fallback sources and paid search APIs can be combined.
-- Two implementations expose the same tool surface: Node/curl and Python stdlib.
-- Results include provider notes so failures and fallback behavior are visible.
+Use it in compliance with local laws, site rules, and your organization's security requirements. This tool provides technical access only; it does not bypass login, captcha, or authorization controls.
 
-External web content is returned only as source material. It does not represent the project's position. For factual, policy, legal, medical, or financial topics, verify with authoritative and official sources.
+## Requirements
 
-## Which Version Should I Use?
-
-### Node/curl build: `claude_net_mcp.mjs`
-
-Recommended for Windows users. It uses `curl.exe`, which handles local HTTP, SOCKS, and mixed proxy setups better.
+Clone the project first:
 
 ```powershell
-node --check .\claude_net_mcp.mjs
-claude mcp add --scope user net-tools -- node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
+git clone https://github.com/Wch727/claude-code-net-tools.git
+cd claude-code-net-tools
 ```
 
-If Claude Code cannot find `node`, use an absolute path:
+You can also download and unzip the repository from GitHub.
+
+### Node/curl Build (Recommended)
+
+Required:
+
+- Node.js 20 or newer. Check with `node -v`.
+- curl/curl.exe. Windows 10/11 usually includes `curl.exe`; check with `curl.exe --version`. On macOS/Linux, check with `curl --version`.
+
+Not required:
+
+- The default Node/curl build does not need `npm install`. It uses only Node built-in modules and the system curl binary.
+
+Optional:
+
+- Poppler `pdftotext`: needed by `fetch_pdf` to extract PDF text. Put `pdftotext` on PATH, or set `CLAUDE_NET_PDFTOTEXT` to the executable path.
+- Search API keys: pass them only through environment variables, such as `BRAVE_SEARCH_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `SERPER_API_KEY`, and `TAVILY_API_KEY`.
+- Local proxy/VPN: set `CLAUDE_NET_PROXY`, for example `http://127.0.0.1:7890` or `socks5h://127.0.0.1:7890`. Set it to `direct` to force direct access.
+
+### Python Build (Fallback)
+
+Required:
+
+- Python 3.10 or newer. Check with `python --version`.
+
+Not required:
+
+- The default Python build does not need `pip install`. It uses only the Python standard library.
+
+Optional:
+
+- Poppler `pdftotext`: needed by `fetch_pdf`.
+- Search API keys: same as the Node/curl build, passed through environment variables.
+- HTTP(S) proxy: supported by Python's standard library. SOCKS proxies are not part of the standard library, so use the Node/curl build for SOCKS.
+
+## Add To Claude Code
+
+Node/curl build:
 
 ```powershell
-claude mcp add --scope user net-tools -- C:\Progra~1\nodejs\node.exe C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
+claude mcp add net-tools node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
 ```
 
-### Python build: `claude_net_mcp.py`
-
-Useful when you want a no-npm stdlib fallback. Python stdlib does not support SOCKS proxies; use the Node/curl build for SOCKS.
+Python build:
 
 ```powershell
-python -m py_compile .\claude_net_mcp.py
-claude mcp add --scope user net-tools-py -- python C:\path\to\claude-code-net-tools\claude_net_mcp.py
+claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_mcp.py
 ```
+
+Other MCP clients can use an equivalent config:
+
+```json
+{
+  "mcpServers": {
+    "net-tools": {
+      "command": "node",
+      "args": ["C:\\path\\to\\claude-code-net-tools\\claude_net_mcp.mjs"],
+      "env": {
+        "CLAUDE_NET_PROXY": "http://127.0.0.1:7890"
+      }
+    }
+  }
+}
+```
+
+If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
+
+## Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `CLAUDE_NET_PROXY` | Force the route. Supports `http://`, `https://`, `socks5h://` in the Node/curl build, or `direct`. |
+| `CLAUDE_NET_HTTP_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` | Proxy fallback when `CLAUDE_NET_PROXY` is not set. |
+| `CLAUDE_NET_SEARCH_PROVIDERS` | Override provider order, for example `kimi,minimax,duckduckgo,bing_rss`. |
+| `CLAUDE_NET_CURL` | Custom curl path for the Node/curl build. |
+| `CLAUDE_NET_PDFTOTEXT` | Custom `pdftotext` path. |
+| `CLAUDE_NET_COOKIE_DIR` | Directory for cookie jars. |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API. |
+| `KIMI_API_KEY` / `MOONSHOT_API_KEY` | Kimi/Moonshot web search. |
+| `MINIMAX_API_KEY` | MiniMax web search. |
+| `SERPER_API_KEY` / `GOOGLE_SERPER_API_KEY` | Serper API. |
+| `TAVILY_API_KEY` | Tavily API. |
+| `CLAUDE_NET_DEBUG` | Print more detailed error messages. |
 
 ## Tools
 
-- `proxy_status`: show connection routes and provider order.
-- `search_web`: search the web and return titles, URLs, snippets, providers, and diagnostics.
-- `fetch_url`: fetch a URL and return extracted readable text.
-
-`search_web` arguments:
-
-- `query`: search query.
-- `count`: number of results, 1 to 10.
-- `providers`: optional provider order, for example `['duckduckgo', 'sogou', 'bing_html']`.
-- `rerank`: optional heuristic re-ranking, default `false`. When `true`, the tool gathers extra candidates and prioritizes results that look like person profiles, organization pages, encyclopedic pages, or source pages. When omitted, provider order is preserved.
-- `allowed_domains`: optional domain allowlist.
-- `blocked_domains`: optional domain blocklist.
-
-## Search Providers
-
-Provider order is adjusted by query language. For Chinese queries, the tool prefers Chinese-friendly fallbacks and retries with the core name extracted from questions such as "who is X". By default, results are not re-ranked. For Chinese queries without `rerank`, each provider is capped so one source cannot fill the whole result page.
-
-Free fallbacks:
-
-- `duckduckgo`
-- `sogou`
-- `so360`
-- `bing_html`
-- `bing_rss`
-
-Optional API providers (not called by default; used only when explicitly listed in `providers` or `CLAUDE_NET_SEARCH_PROVIDERS`):
-
-- `brave`: `BRAVE_SEARCH_API_KEY`
-- `serper`: `SERPER_API_KEY` or `GOOGLE_SERPER_API_KEY`
-- `tavily`: `TAVILY_API_KEY`
-- `kimi`: `KIMI_API_KEY` or `MOONSHOT_API_KEY`
-- `minimax`: `MINIMAX_API_KEY`
-
-Kimi and MiniMax support is implemented as an experimental compatible chat completions + web search tool path. Actual availability depends on your account, model, and gateway. If a provider fails, the tool continues with the next provider. The repository contains no API keys and does not call potentially billable providers by default.
-
-## Local VPN/Proxy Configuration
-
-Routes are tried in this order:
-
-1. `CLAUDE_NET_PROXY`
-2. `CLAUDE_NET_HTTP_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and lowercase variants
-3. Common local ports: `7890`, `7897`, `7899`, `10809`, `10808`, `1080`, `8080`, `20171`, `2080`
-4. direct
-
-Force a local proxy:
-
-```powershell
-$env:CLAUDE_NET_PROXY = "http://127.0.0.1:7890"
-```
-
-Force direct networking:
-
-```powershell
-$env:CLAUDE_NET_PROXY = "direct"
-```
-
-Override provider order:
-
-```powershell
-$env:CLAUDE_NET_SEARCH_PROVIDERS = "duckduckgo,sogou,bing_html"
-```
-
-API keys are read only from environment variables. Do not commit keys to the repository or documentation. To use paid/account-backed APIs, explicitly add those providers to `CLAUDE_NET_SEARCH_PROVIDERS` or a one-off tool call.
+- `proxy_status`: shows the current route, provider order, and important environment-variable status.
+- `search_web`: searches the web. By default it does not apply heuristic reranking; it only deduplicates, applies basic relevance filtering, and honors domain filters. Pass `rerank: true` if you want heuristic reranking.
+- `fetch_url`: fetches a URL with `GET/POST/PUT/PATCH/DELETE`, custom headers, cookies, cookie jars, request bodies, and `auto/text/markdown/raw` extraction modes.
+- `extract_links`: fetches a page and extracts normalized links, optionally limited to the same domain.
+- `fetch_json`: fetches a JSON endpoint and pretty-prints parsed JSON.
+- `fetch_rss`: fetches RSS/Atom feeds and returns feed entries.
+- `fetch_pdf`: downloads a PDF and extracts text when `pdftotext` is installed.
 
 ## Examples
 
+In Claude Code, you can ask:
+
 ```text
 Use net-tools proxy_status.
+Use net-tools search_web to search "Claude Code MCP" count 5.
+Use net-tools fetch_url to read https://example.com as markdown.
+Use net-tools extract_links to list same-domain links from https://example.com.
+Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
+Use net-tools fetch_rss to read https://github.blog/feed/ count 5.
+Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5, then choose the official arXiv result and use net-tools fetch_pdf to read the PDF.
 ```
 
-```text
-Use net-tools search_web to search for sample person profile.
+You can also specify providers directly in MCP arguments:
+
+```json
+{
+  "query": "Claude Code MCP",
+  "count": 5,
+  "providers": ["duckduckgo", "bing_rss"],
+  "rerank": false
+}
 ```
 
-```text
-Use net-tools fetch_url to read https://example.com.
-```
+## Notes And Limits
 
-Enable re-ranking when you want profile/source pages first:
+This is not a full browser. It does not execute JavaScript, keep browser login sessions, or solve captchas. For dynamic or login-only pages, pair it later with a browser automation MCP such as Playwright/Chromium.
 
-```text
-Use net-tools search_web to search for sample person profile with rerank true.
-```
+The current version is meant for search, public page reading, API/JSON/RSS fetching, and PDF text extraction. Future additions can include:
 
-Restrict domains:
+- A Playwright browser-rendering mode for JavaScript-heavy pages.
+- Browser cookie import or session bridging.
+- OCR, screenshots, and structured page extraction.
+- More search providers and clearer provider failure reporting.
 
-```text
-Use net-tools search_web to search for sample researcher profile with allowed_domains ['example.edu.cn'].
-```
-
-## Troubleshooting
-
-Check MCP connectivity:
+## Development Check
 
 ```powershell
-claude mcp get net-tools
+npm run check
 ```
 
-Check the Node build:
-
-```powershell
-node --check C:\path\to\claude_net_mcp.mjs
-```
-
-Check the Python build:
-
-```powershell
-python -m py_compile C:\path\to\claude_net_mcp.py
-```
-
-Common issues:
-
-- `Failed to connect`: use absolute `node.exe` / `python.exe` paths.
-- Irrelevant search results: pass `providers` explicitly, set `CLAUDE_NET_SEARCH_PROVIDERS`, or use `rerank: true` when profile/source pages should be preferred.
-- Proxy pollution: set `CLAUDE_NET_PROXY=direct` or explicitly set the local proxy URL.
-- API provider errors: check the key, model, base URL, and whether the account supports web search.
-
-## Notes
-
-This is not a full browser. It does not execute JavaScript, preserve login state, or solve captchas. For dynamic or authenticated pages, pair it with a browser automation MCP.
+This checks the Node build syntax and compiles the Python build. It does not download dependencies.
