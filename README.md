@@ -99,6 +99,8 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 | `CLAUDE_NET_PROXY` | 强制网络出口。支持 `http://`、`https://`、`socks5h://`（Node/curl 版）或 `direct`。 |
 | `CLAUDE_NET_HTTP_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` | 未设置 `CLAUDE_NET_PROXY` 时的代理回退。 |
 | `CLAUDE_NET_SEARCH_PROVIDERS` | 覆盖搜索 provider 顺序，例如 `kimi,minimax,duckduckgo,bing_rss`。 |
+| `CLAUDE_NET_DISABLED_PROVIDERS` | 禁用指定 provider，例如 `duckduckgo,bing_html`。 |
+| `CLAUDE_NET_PROVIDER_FAIL_LIMIT` | provider 连续失败多少次后自动跳过，默认 `3`。 |
 | `CLAUDE_NET_CURL` | Node/curl 版自定义 curl 路径。 |
 | `CLAUDE_NET_PDFTOTEXT` | 自定义 `pdftotext` 路径。 |
 | `CLAUDE_NET_COOKIE_DIR` | cookie jar 存储目录。 |
@@ -113,8 +115,11 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 
 - `proxy_status`：显示当前网络出口、provider 顺序和关键环境变量状态。
 - `pdf_status`：检查本机 `pdftotext` 路径、版本和可执行状态。
-- `search_web`：搜索网页。默认不做启发式重排，只做去重、基础相关性过滤和域名过滤；需要重排时传 `rerank: true`。
-- `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/text/markdown/raw` 提取模式。
+- `search_status`：查看搜索 provider 的 key 配置、禁用状态、最近成功/失败和可选 live 探测。
+- `search_web`：搜索网页。默认不做启发式重排，只做去重、基础相关性过滤和域名过滤；provider 缺 key、被禁用或连续失败时会自动降级到其它 provider；需要重排时传 `rerank: true`。
+- `scholar_search`：专项搜索论文，当前支持 Semantic Scholar、Crossref、arXiv。
+- `package_search`：专项搜索开发包和仓库，当前支持 npm、PyPI、GitHub repositories。
+- `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/readable/text/markdown/raw` 提取模式；`auto` 默认使用正文抽取。
 - `extract_links`：抓取页面并提取规范化链接，可限制同域名。
 - `fetch_json`：抓取 JSON endpoint 并格式化输出。
 - `fetch_rss`：抓取 RSS/Atom feed 并输出条目。
@@ -127,11 +132,15 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 ```text
 Use net-tools proxy_status.
 Use net-tools pdf_status.
+Use net-tools search_status.
 Use net-tools search_web to search "Claude Code MCP" count 5.
+Use net-tools fetch_url to read https://example.com with extract readable.
 Use net-tools fetch_url to read https://example.com as markdown.
 Use net-tools extract_links to list same-domain links from https://example.com.
 Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
 Use net-tools fetch_rss to read https://github.blog/feed/ count 5.
+Use net-tools scholar_search to search "Attention Is All You Need" count 5.
+Use net-tools package_search to search "playwright" ecosystem npm count 5.
 Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5, then choose the official arXiv result and use net-tools fetch_pdf to read the PDF.
 ```
 

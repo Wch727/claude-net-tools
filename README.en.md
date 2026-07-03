@@ -99,6 +99,8 @@ If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
 | `CLAUDE_NET_PROXY` | Force the route. Supports `http://`, `https://`, `socks5h://` in the Node/curl build, or `direct`. |
 | `CLAUDE_NET_HTTP_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` | Proxy fallback when `CLAUDE_NET_PROXY` is not set. |
 | `CLAUDE_NET_SEARCH_PROVIDERS` | Override provider order, for example `kimi,minimax,duckduckgo,bing_rss`. |
+| `CLAUDE_NET_DISABLED_PROVIDERS` | Disable providers, for example `duckduckgo,bing_html`. |
+| `CLAUDE_NET_PROVIDER_FAIL_LIMIT` | Consecutive provider failures before automatic skip. Default `3`. |
 | `CLAUDE_NET_CURL` | Custom curl path for the Node/curl build. |
 | `CLAUDE_NET_PDFTOTEXT` | Custom `pdftotext` path. |
 | `CLAUDE_NET_COOKIE_DIR` | Directory for cookie jars. |
@@ -113,8 +115,11 @@ If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
 
 - `proxy_status`: shows the current route, provider order, and important environment-variable status.
 - `pdf_status`: checks the local `pdftotext` path, version, and executable status.
-- `search_web`: searches the web. By default it does not apply heuristic reranking; it only deduplicates, applies basic relevance filtering, and honors domain filters. Pass `rerank: true` if you want heuristic reranking.
-- `fetch_url`: fetches a URL with `GET/POST/PUT/PATCH/DELETE`, custom headers, cookies, cookie jars, request bodies, and `auto/text/markdown/raw` extraction modes.
+- `search_status`: shows provider key configuration, disabled status, recent success/failure counts, and optional live probes.
+- `search_web`: searches the web. By default it does not apply heuristic reranking; it only deduplicates, applies basic relevance filtering, and honors domain filters. Providers with missing keys, disabled status, or repeated failures are automatically degraded to other providers. Pass `rerank: true` if you want heuristic reranking.
+- `scholar_search`: specialized paper search through Semantic Scholar, Crossref, and arXiv.
+- `package_search`: specialized developer package and repository search through npm, PyPI, and GitHub repositories.
+- `fetch_url`: fetches a URL with `GET/POST/PUT/PATCH/DELETE`, custom headers, cookies, cookie jars, request bodies, and `auto/readable/text/markdown/raw` extraction modes; `auto` uses readable main-content extraction for HTML.
 - `extract_links`: fetches a page and extracts normalized links, optionally limited to the same domain.
 - `fetch_json`: fetches a JSON endpoint and pretty-prints parsed JSON.
 - `fetch_rss`: fetches RSS/Atom feeds and returns feed entries.
@@ -127,11 +132,15 @@ In Claude Code, you can ask:
 ```text
 Use net-tools proxy_status.
 Use net-tools pdf_status.
+Use net-tools search_status.
 Use net-tools search_web to search "Claude Code MCP" count 5.
+Use net-tools fetch_url to read https://example.com with extract readable.
 Use net-tools fetch_url to read https://example.com as markdown.
 Use net-tools extract_links to list same-domain links from https://example.com.
 Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
 Use net-tools fetch_rss to read https://github.blog/feed/ count 5.
+Use net-tools scholar_search to search "Attention Is All You Need" count 5.
+Use net-tools package_search to search "playwright" ecosystem npm count 5.
 Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5, then choose the official arXiv result and use net-tools fetch_pdf to read the PDF.
 ```
 

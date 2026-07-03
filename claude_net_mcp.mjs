@@ -9,14 +9,40 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SERVER_NAME = "claude-code-net-tools";
-const SERVER_VERSION = "0.5.1";
+const SERVER_VERSION = "0.6.0";
 const COMMON_LOCAL_PROXY_PORTS = [7890, 7897, 7899, 10809, 10808, 1080, 8080, 20171, 2080];
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 const CURL = process.env.CLAUDE_NET_CURL || "curl.exe";
-
+const PROVIDER_FAIL_LIMIT = Math.max(1, Math.min(Number(process.env.CLAUDE_NET_PROVIDER_FAIL_LIMIT) || 3, 10));
+const PROVIDER_STATS = new Map();
+const SEARCH_PROVIDER_META = {
+  kimi: { kind: "api", env: ["KIMI_API_KEY", "MOONSHOT_API_KEY"], description: "Kimi/Moonshot web search API" },
+  minimax: { kind: "api", env: ["MINIMAX_API_KEY"], description: "MiniMax web search API" },
+  brave: { kind: "api", env: ["BRAVE_SEARCH_API_KEY"], description: "Brave Search API" },
+  serper: { kind: "api", env: ["SERPER_API_KEY", "GOOGLE_SERPER_API_KEY"], description: "Serper Google Search API" },
+  tavily: { kind: "api", env: ["TAVILY_API_KEY"], description: "Tavily Search API" },
+  duckduckgo: { kind: "free", env: [], description: "DuckDuckGo HTML fallback" },
+  bing_rss: { kind: "free", env: [], description: "Bing RSS fallback" },
+  bing_html: { kind: "free", env: [], description: "Bing HTML fallback" },
+  sogou: { kind: "free", env: [], description: "Sogou HTML fallback" },
+  so360: { kind: "free", env: [], description: "360 Search HTML fallback" },
+};
 const TOOLS = [
   { name: "proxy_status", description: "Show local VPN/proxy routes and provider order.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "pdf_status", description: "Check the local PDF text extraction command used by fetch_pdf.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  {
+    name: "search_status",
+    description: "Show search provider availability, recent failures, and optional live health probes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", default: "Claude Code MCP" },
+        providers: { type: "array", items: { type: "string" } },
+        live: { type: "boolean", default: false, description: "When true, run a one-result live probe for available providers." },
+      },
+      additionalProperties: false,
+    },
+  },
   {
     name: "search_web",
     description: "Search the public web with API providers and free HTML/RSS fallbacks.",
@@ -29,6 +55,35 @@ const TOOLS = [
         rerank: { type: "boolean", default: false, description: "When true, apply heuristic result re-ranking. Default false preserves provider order." },
         allowed_domains: { type: "array", items: { type: "string" } },
         blocked_domains: { type: "array", items: { type: "string" } },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "scholar_search",
+    description: "Search academic papers through specialized providers such as Semantic Scholar, Crossref, and arXiv.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        count: { type: "number", minimum: 1, maximum: 10, default: 5 },
+        providers: { type: "array", items: { type: "string" }, description: "semantic_scholar, crossref, arxiv" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "package_search",
+    description: "Search developer package and repository indexes such as npm, PyPI, and GitHub repositories.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        count: { type: "number", minimum: 1, maximum: 10, default: 5 },
+        ecosystem: { type: "string", enum: ["all", "npm", "pypi", "github"], default: "all" },
+        providers: { type: "array", items: { type: "string" }, description: "npm, pypi, github" },
       },
       required: ["query"],
       additionalProperties: false,
@@ -48,7 +103,7 @@ const TOOLS = [
         cookies: { description: "Cookie header string or object of cookie name/value pairs." },
         cookie_jar: { type: "string", description: "Optional local cookie jar name to load and save between calls." },
         body: { type: "string", description: "Optional request body for non-GET requests." },
-        extract: { type: "string", enum: ["auto", "text", "markdown", "raw"], default: "auto" },
+        extract: { type: "string", enum: ["auto", "readable", "text", "markdown", "raw"], default: "auto" },
       },
       required: ["url"],
       additionalProperties: false,
@@ -512,25 +567,319 @@ async function searchSo360(query, count) {
   return parseGenericHtml(text, count, "so360");
 }
 
-function providerOrder(query, override) {
-  if (Array.isArray(override) && override.length) return override.map(String);
+function normalizeProviderName(provider) {
+  const value = String(provider || "").trim().toLowerCase().replace(/-/g, "_");
+  const aliases = { ddg: "duckduckgo", bing: "bing_html", "360": "so360", semantic: "semantic_scholar", semanticscholar: "semantic_scholar", ss: "semantic_scholar", github_repos: "github" };
+  return aliases[value] || value;
+}
+
+function splitList(value) {
+  return String(value || "").split(/[;,]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function disabledProviderSet() {
+  return new Set(splitList(process.env.CLAUDE_NET_DISABLED_PROVIDERS).map(normalizeProviderName));
+}
+
+function providerAvailability(provider) {
+  const name = normalizeProviderName(provider);
+  const disabled = disabledProviderSet();
+  if (disabled.has(name)) return { available: false, reason: "disabled by CLAUDE_NET_DISABLED_PROVIDERS" };
+  const meta = SEARCH_PROVIDER_META[name];
+  if (!meta) return { available: false, reason: "unknown provider" };
+  if (meta.env && meta.env.length && !meta.env.some((key) => Boolean(process.env[key]))) return { available: false, reason: "missing env: " + meta.env.join(" or ") };
+  return { available: true, reason: "configured" };
+}
+
+function providerStats(provider) {
+  const name = normalizeProviderName(provider);
+  if (!PROVIDER_STATS.has(name)) PROVIDER_STATS.set(name, { success: 0, failure: 0, consecutiveFailures: 0, lastMs: 0, lastCount: 0, lastError: "", lastAt: "" });
+  return PROVIDER_STATS.get(name);
+}
+
+function recordProvider(provider, ok, elapsedMs, count = 0, error = "") {
+  const stats = providerStats(provider);
+  if (ok) {
+    stats.success += 1;
+    stats.consecutiveFailures = 0;
+    stats.lastError = "";
+  } else {
+    stats.failure += 1;
+    stats.consecutiveFailures += 1;
+    stats.lastError = String(error || "unknown error").slice(0, 240);
+  }
+  stats.lastMs = elapsedMs;
+  stats.lastCount = count;
+  stats.lastAt = new Date().toISOString();
+}
+
+function baseProviderOrder(query, override) {
+  if (Array.isArray(override) && override.length) return override.map(normalizeProviderName);
   const env = String(process.env.CLAUDE_NET_SEARCH_PROVIDERS || "").trim();
-  if (env) return env.split(/[;,]/).map((x) => x.trim()).filter(Boolean);
+  if (env) return splitList(env).map(normalizeProviderName);
   if (isCjk(query)) return ["duckduckgo", "sogou", "so360", "bing_html", "bing_rss"];
   return ["duckduckgo", "bing_rss", "bing_html"];
 }
 
+function dedupeProviders(providers) {
+  const seen = new Set();
+  const out = [];
+  for (const provider of providers.map(normalizeProviderName)) {
+    if (!provider || seen.has(provider)) continue;
+    seen.add(provider);
+    out.push(provider);
+  }
+  return out;
+}
+
+function providerOrder(query, override) {
+  return dedupeProviders(baseProviderOrder(query, override));
+}
+
+function activeProviderOrder(query, override, notes = [], options = {}) {
+  const explicit = Array.isArray(override) && override.length;
+  const out = [];
+  for (const provider of providerOrder(query, override)) {
+    const availability = providerAvailability(provider);
+    if (!availability.available) {
+      notes.push(provider + ": skipped (" + availability.reason + ")");
+      continue;
+    }
+    const stats = providerStats(provider);
+    if (!explicit && !options.ignoreFailureLimit && stats.consecutiveFailures >= PROVIDER_FAIL_LIMIT) {
+      notes.push(provider + ": skipped after " + stats.consecutiveFailures + " consecutive failure(s); run search_status live=true to refresh");
+      continue;
+    }
+    out.push(provider);
+  }
+  return out;
+}
+
 async function runProvider(provider, query, count) {
-  if (provider === "kimi" || provider === "minimax") return searchChatWeb(provider, query, count);
-  if (provider === "brave") return searchBrave(query, count);
-  if (provider === "serper") return searchSerper(query, count);
-  if (provider === "tavily") return searchTavily(query, count);
-  if (provider === "duckduckgo" || provider === "ddg") return searchDuckDuckGo(query, count);
-  if (provider === "bing_rss") return searchBingRss(query, count);
-  if (provider === "bing" || provider === "bing_html") return searchBingHtml(query, count);
-  if (provider === "sogou") return searchSogou(query, count);
-  if (provider === "so360" || provider === "360") return searchSo360(query, count);
+  const name = normalizeProviderName(provider);
+  if (name === "kimi" || name === "minimax") return searchChatWeb(name, query, count);
+  if (name === "brave") return searchBrave(query, count);
+  if (name === "serper") return searchSerper(query, count);
+  if (name === "tavily") return searchTavily(query, count);
+  if (name === "duckduckgo") return searchDuckDuckGo(query, count);
+  if (name === "bing_rss") return searchBingRss(query, count);
+  if (name === "bing_html") return searchBingHtml(query, count);
+  if (name === "sogou") return searchSogou(query, count);
+  if (name === "so360") return searchSo360(query, count);
+  throw new Error("Unknown provider: " + provider);
+}
+
+async function runProviderTracked(provider, query, count) {
+  const started = Date.now();
+  try {
+    const rows = await runProvider(provider, query, count);
+    recordProvider(provider, true, Date.now() - started, rows.length);
+    return rows;
+  } catch (error) {
+    recordProvider(provider, false, Date.now() - started, 0, error.message || String(error));
+    throw error;
+  }
+}
+
+async function searchStatus(args = {}) {
+  const query = String(args?.query || "Claude Code MCP").trim() || "Claude Code MCP";
+  const providers = dedupeProviders(Array.isArray(args?.providers) && args.providers.length ? args.providers : Object.keys(SEARCH_PROVIDER_META));
+  const lines = ["Search provider status:", "Default non-CJK order: " + providerOrder("test", []).join(", "), "Default CJK order: " + providerOrder("测试", []).join(", "), "Failure skip threshold: " + PROVIDER_FAIL_LIMIT, ""];
+  const probe = Boolean(args?.live);
+  for (const provider of providers) {
+    const availability = providerAvailability(provider);
+    if (probe && availability.available) {
+      try { await runProviderTracked(provider, query, 1); } catch { /* stats already recorded */ }
+    }
+    const stats = providerStats(provider);
+    const meta = SEARCH_PROVIDER_META[provider] || {};
+    const pieces = ["- " + provider, "kind=" + (meta.kind || "unknown"), "available=" + availability.available, "reason=" + availability.reason, "success=" + stats.success, "failure=" + stats.failure, "consecutiveFailures=" + stats.consecutiveFailures];
+    if (stats.lastAt) pieces.push("last=" + stats.lastCount + " result(s) in " + stats.lastMs + "ms at " + stats.lastAt);
+    if (stats.lastError) pieces.push("lastError=" + stats.lastError);
+    lines.push(pieces.join("; "));
+  }
+  if (!probe) lines.push("", "Set live=true to run one-result health probes for available providers.");
+  return lines.join("\n");
+}
+
+async function searchSemanticScholar(query, count) {
+  const fields = "title,url,abstract,year,venue,authors,externalIds,openAccessPdf";
+  const { text } = await curlRequest("https://api.semanticscholar.org/graph/v1/paper/search?" + new URLSearchParams({ query, limit: String(count), fields }), { headers: { Accept: "application/json" }, timeout: 15, maxBytes: 1200000 });
+  const data = JSON.parse(text);
+  return (data.data || []).map((item) => {
+    const arxiv = item.externalIds?.ArXiv ? "https://arxiv.org/abs/" + item.externalIds.ArXiv : "";
+    const pdf = item.openAccessPdf?.url || "";
+    const authors = (item.authors || []).slice(0, 4).map((author) => author.name).filter(Boolean).join(", ");
+    const snippet = [item.year, item.venue, authors, item.abstract].filter(Boolean).join(" | ");
+    return result(item.title, pdf || item.url || arxiv, snippet, "semantic_scholar");
+  });
+}
+
+async function searchCrossref(query, count) {
+  const { text } = await curlRequest("https://api.crossref.org/works?" + new URLSearchParams({ query, rows: String(count) }), { headers: { Accept: "application/json" }, timeout: 15, maxBytes: 1200000 });
+  const data = JSON.parse(text);
+  return (data.message?.items || []).map((item) => {
+    const title = Array.isArray(item.title) ? item.title[0] : item.title;
+    const container = Array.isArray(item["container-title"]) ? item["container-title"][0] : "";
+    const year = item.published?.["date-parts"]?.[0]?.[0] || item.created?.["date-parts"]?.[0]?.[0] || "";
+    const doi = item.DOI ? "DOI: " + item.DOI : "";
+    return result(title, item.URL, [year, container, doi].filter(Boolean).join(" | "), "crossref");
+  });
+}
+
+function parseArxivEntries(xml, count) {
+  const rows = [];
+  const re = /<entry\b[\s\S]*?<\/entry>/gi;
+  let match;
+  while ((match = re.exec(xml)) && rows.length < count) {
+    const block = match[0];
+    const title = tagText(block, "title");
+    const abs = tagText(block, "id");
+    const summary = tagText(block, "summary");
+    const published = tagText(block, "published") || tagText(block, "updated");
+    const pdf = (block.match(/<link\b[^>]*title=["']pdf["'][^>]*href=["']([^"']+)["']/i) || [])[1] || "";
+    rows.push(result(title, pdf || abs, [published, summary].filter(Boolean).join(" | "), "arxiv"));
+  }
+  return rows;
+}
+
+async function searchArxiv(query, count) {
+  const attempts = [];
+  const cleaned = normalizeSpace(query).replace(/"/g, "");
+  if (cleaned.includes(" ")) attempts.push('ti:"' + cleaned + '"');
+  attempts.push("all:" + query);
+  const notes = [];
+  for (const searchQuery of attempts) {
+    try {
+      const params = new URLSearchParams({ search_query: searchQuery, start: "0", max_results: String(count) });
+      const { text } = await curlRequest("https://export.arxiv.org/api/query?" + params, { headers: { Accept: "application/atom+xml,application/xml" }, timeout: 20, maxBytes: 1200000 });
+      const rows = parseArxivEntries(text, count);
+      if (rows.length) return rows;
+      notes.push(searchQuery + ": 0 result(s)");
+    } catch (error) {
+      notes.push(searchQuery + ": " + error.message);
+    }
+  }
+  if (notes.length) throw new Error(notes.join("; "));
   return [];
+}
+
+async function scholarProvider(provider, query, count) {
+  const name = normalizeProviderName(provider);
+  if (name === "semantic_scholar") return searchSemanticScholar(query, count);
+  if (name === "crossref") return searchCrossref(query, count);
+  if (name === "arxiv") return searchArxiv(query, count);
+  throw new Error("Unknown scholar provider: " + provider);
+}
+
+async function scholarSearch(args) {
+  const query = String(args?.query || "").trim();
+  if (!query) throw new Error("query is required");
+  const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
+  const providers = dedupeProviders(Array.isArray(args?.providers) && args.providers.length ? args.providers : ["arxiv", "semantic_scholar", "crossref"]);
+  const notes = [];
+  let rows = [];
+  for (const provider of providers) {
+    try {
+      const providerRows = await scholarProvider(provider, query, count);
+      notes.push(provider + ": " + providerRows.length + " result(s)");
+      rows = dedupe(rows.concat(providerRows));
+    } catch (error) {
+      notes.push(provider + ": " + error.message);
+    }
+  }
+  return formatResultRows("Scholar results for: " + query, rankRows(rows, query).slice(0, count), notes);
+}
+
+async function searchNpmPackages(query, count) {
+  const { text } = await curlRequest("https://registry.npmjs.org/-/v1/search?" + new URLSearchParams({ text: query, size: String(count) }), { headers: { Accept: "application/json" }, timeout: 15, maxBytes: 1200000 });
+  const data = JSON.parse(text);
+  return (data.objects || []).map((item) => {
+    const pkg = item.package || {};
+    const score = item.score?.final ? "score " + item.score.final.toFixed(3) : "";
+    return result((pkg.name || "(unnamed)") + " " + (pkg.version || ""), pkg.links?.npm || "https://www.npmjs.com/package/" + pkg.name, [pkg.description, score].filter(Boolean).join(" | "), "npm");
+  });
+}
+
+async function searchGithubRepos(query, count) {
+  const { text } = await curlRequest("https://api.github.com/search/repositories?" + new URLSearchParams({ q: query, per_page: String(count) }), { headers: { Accept: "application/vnd.github+json" }, timeout: 15, maxBytes: 1200000 });
+  const data = JSON.parse(text);
+  return (data.items || []).map((item) => result(item.full_name, item.html_url, [item.description, (item.stargazers_count || 0) + " stars", item.language].filter(Boolean).join(" | "), "github"));
+}
+
+function parsePypiHtml(html, count) {
+  const rows = [];
+  const re = /<a\b(?=[^>]*class=["'][^"']*package-snippet)(?=[^>]*href=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = re.exec(html)) && rows.length < count) {
+    const block = match[2];
+    const name = tagText(block, "span") || tagText(block, "h3") || stripTagsToText(block).split("\n")[0];
+    const version = (block.match(/package-snippet__version[^>]*>([\s\S]*?)<\//i) || [])[1];
+    const desc = (block.match(/package-snippet__description[^>]*>([\s\S]*?)<\//i) || [])[1];
+    rows.push(result([name, stripTags(version || "")].filter(Boolean).join(" "), new URL(match[1], "https://pypi.org").href, stripTags(desc || ""), "pypi"));
+  }
+  return rows;
+}
+
+async function searchPypiPackages(query, count) {
+  const rows = [];
+  if (/^[A-Za-z0-9_.-]+$/.test(query)) {
+    try {
+      const { text } = await curlRequest("https://pypi.org/pypi/" + encodeURIComponent(query) + "/json", { headers: { Accept: "application/json" }, timeout: 12, maxBytes: 1200000 });
+      const data = JSON.parse(text);
+      rows.push(result((data.info?.name || query) + " " + (data.info?.version || ""), data.info?.package_url || "https://pypi.org/project/" + query + "/", data.info?.summary || "", "pypi"));
+    } catch { /* exact package lookup is optional */ }
+  }
+  if (rows.length < count) {
+    const { text } = await curlRequest("https://pypi.org/search/?" + new URLSearchParams({ q: query }), { timeout: 15, maxBytes: 1200000 });
+    rows.push(...parsePypiHtml(text, count - rows.length));
+  }
+  return dedupe(rows).slice(0, count);
+}
+
+async function packageProvider(provider, query, count) {
+  const name = normalizeProviderName(provider);
+  if (name === "npm") return searchNpmPackages(query, count);
+  if (name === "pypi") return searchPypiPackages(query, count);
+  if (name === "github") return searchGithubRepos(query, count);
+  throw new Error("Unknown package provider: " + provider);
+}
+
+async function packageSearch(args) {
+  const query = String(args?.query || "").trim();
+  if (!query) throw new Error("query is required");
+  const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
+  const ecosystem = String(args?.ecosystem || "all").toLowerCase();
+  const defaults = ecosystem === "npm" ? ["npm"] : ecosystem === "pypi" ? ["pypi"] : ecosystem === "github" ? ["github"] : ["npm", "pypi", "github"];
+  const providers = dedupeProviders(Array.isArray(args?.providers) && args.providers.length ? args.providers : defaults);
+  const notes = [];
+  let rows = [];
+  for (const provider of providers) {
+    try {
+      const providerRows = await packageProvider(provider, query, count);
+      notes.push(provider + ": " + providerRows.length + " result(s)");
+      rows = dedupe(rows.concat(providerRows));
+    } catch (error) {
+      notes.push(provider + ": " + error.message);
+    }
+  }
+  return formatResultRows("Package results for: " + query, rows.slice(0, count), notes);
+}
+
+function formatResultRows(title, rows, notes = []) {
+  if (!rows.length) return [title, "", "No results.", "", "Provider notes:", ...notes.map((note) => "- " + note)].join("\n");
+  const lines = [title, ""];
+  rows.forEach((row, index) => {
+    lines.push((index + 1) + ". " + row.title);
+    lines.push("   URL: " + row.url);
+    lines.push("   Provider: " + (row.provider || "unknown"));
+    if (row.snippet) lines.push("   Snippet: " + row.snippet);
+  });
+  if (notes.length) {
+    lines.push("", "Provider notes:");
+    notes.slice(0, 12).forEach((note) => lines.push("- " + note));
+  }
+  return lines.join("\n");
 }
 
 async function searchWeb(args) {
@@ -541,23 +890,23 @@ async function searchWeb(args) {
   const candidateCount = rerank ? Math.max(count, 10) : count;
   const queries = [query];
   const core = coreQuery(query);
-  if (isCjk(query) && core && core !== query) queries.push(`"${core}"`, core);
-  const providers = providerOrder(query, args?.providers);
-  const providerCount = (!rerank && isCjk(query) && providers.length > 1) ? Math.max(1, Math.ceil(count / 2)) : candidateCount;
+  if (isCjk(query) && core && core !== query) queries.push('"' + core + '"', core);
   const notes = [];
   if (rerank) notes.push("rerank: enabled (heuristic result ordering)");
+  const providers = activeProviderOrder(query, args?.providers, notes);
+  const providerCount = (!rerank && isCjk(query) && providers.length > 1) ? Math.max(1, Math.ceil(count / 2)) : candidateCount;
   let rows = [];
   for (const q of queries) {
     for (const provider of providers) {
       if (!isCjk(query) && rows.length >= count) break;
       try {
-        const raw = await runProvider(provider, q, providerCount);
+        const raw = await runProviderTracked(provider, q, providerCount);
         const relevant = filterRelevantRows(raw, query);
-        if (raw.length && !relevant.length) notes.push(`${provider}: ignored ${raw.length} low-relevance result(s)`);
-        if (relevant.length) notes.push(`${provider}: ${relevant.length} result(s) for ${JSON.stringify(q)}`);
+        if (raw.length && !relevant.length) notes.push(provider + ": ignored " + raw.length + " low-relevance result(s)");
+        if (relevant.length) notes.push(provider + ": " + relevant.length + " result(s) for " + JSON.stringify(q));
         rows = dedupe(rows.concat(relevant));
       } catch (error) {
-        notes.push(`${provider}: ${error.message}`);
+        notes.push(provider + ": " + error.message);
       }
     }
     if (!isCjk(query) && rows.length >= count) break;
@@ -565,19 +914,8 @@ async function searchWeb(args) {
   rows = filterDomains(dedupe(rows), args?.allowed_domains || [], args?.blocked_domains || []);
   if (rerank) rows = rankRows(rows, query);
   rows = rows.slice(0, count);
-  if (!rows.length) return [`No search results for ${JSON.stringify(query)}.`, "", "Provider notes:", ...notes.map((x) => `- ${x}`)].join("\n");
-  const lines = [`Search results for: ${query}`, ""];
-  rows.forEach((row, index) => {
-    lines.push(`${index + 1}. ${row.title}`);
-    lines.push(`   URL: ${row.url}`);
-    lines.push(`   Provider: ${row.provider || "unknown"}`);
-    if (row.snippet) lines.push(`   Snippet: ${row.snippet}`);
-  });
-  if (notes.length) {
-    lines.push("", "Provider notes:");
-    notes.slice(0, 12).forEach((note) => lines.push(`- ${note}`));
-  }
-  return lines.join("\n");
+  if (!rows.length) return ["No search results for " + JSON.stringify(query) + ".", "", "Provider notes:", ...notes.map((x) => "- " + x)].join("\n");
+  return formatResultRows("Search results for: " + query, rows, notes);
 }
 
 function stripTagsToText(value) {
@@ -599,8 +937,53 @@ function htmlTitle(html) {
   return normalizeSpace((String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1]);
 }
 
+function cleanReadableHtml(html) {
+  return String(html || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<(nav|header|footer|aside|form|svg|canvas)[\s\S]*?<\/\1>/gi, " ");
+}
+
+function readableCandidates(html) {
+  const cleaned = cleanReadableHtml(html);
+  const candidates = [];
+  const patterns = [
+    ["article", /<article\b[^>]*>[\s\S]*?<\/article>/gi],
+    ["main", /<main\b[^>]*>[\s\S]*?<\/main>/gi],
+    ["role-main", /<([a-z0-9]+)\b[^>]*role=["']main["'][^>]*>[\s\S]*?<\/\1>/gi],
+    ["content", /<(article|main|section|div)\b[^>]*(?:id|class)=["'][^"']*(?:article|content|entry|post|main|story|text|body)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi],
+  ];
+  for (const [label, re] of patterns) {
+    let match;
+    while ((match = re.exec(cleaned)) && candidates.length < 80) candidates.push({ label, html: match[0] });
+  }
+  const body = (cleaned.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i) || [])[1] || cleaned;
+  candidates.push({ label: "body", html: body });
+  return candidates;
+}
+
+function readableScore(candidate) {
+  const text = stripTagsToText(candidate.html);
+  const length = text.length;
+  if (length < 80) return { ...candidate, text, score: 0 };
+  const linkText = stripTagsToText((candidate.html.match(/<a\b[\s\S]*?<\/a>/gi) || []).join(" "));
+  const linkDensity = linkText.length / Math.max(length, 1);
+  const paragraphCount = (candidate.html.match(/<p\b/gi) || []).length;
+  const positive = /(article|content|entry|post|main|story|text|body|markdown|readme)/i.test(candidate.html) ? 250 : 0;
+  const negative = /(comment|reply|sidebar|footer|header|nav|menu|related|advert|promo|share)/i.test(candidate.html) ? 250 : 0;
+  const score = length + paragraphCount * 120 + positive - negative - Math.round(linkDensity * length * 1.8);
+  return { ...candidate, text, score };
+}
+
 function readableHtml(html) {
-  return { title: htmlTitle(html), body: stripTagsToText(html) };
+  const title = htmlTitle(html);
+  const scored = readableCandidates(html).map(readableScore).sort((a, b) => b.score - a.score);
+  const best = scored[0] || { label: "document", html, text: stripTagsToText(html), score: 0 };
+  const fallbackText = stripTagsToText(html);
+  const useBest = best.text && best.text.length >= Math.min(500, Math.max(160, fallbackText.length * 0.12));
+  return { title, body: useBest ? best.text : fallbackText, html: useBest ? best.html : html, source: useBest ? best.label : "document", score: Math.max(0, Math.round(best.score || 0)) };
 }
 
 function htmlToMarkdown(html, baseUrl = "") {
@@ -704,14 +1087,21 @@ function formatFetchedContent(response, args = {}) {
     lines.push("Format: RSS/Atom");
   } else if (extract !== "raw" && (/html/i.test(contentType) || /<html|<!doctype html/i.test(text.slice(0, 1000)))) {
     if (extract === "markdown") {
-      title = htmlTitle(text);
-      body = htmlToMarkdown(text, response.finalUrl);
+      const readable = readableHtml(text);
+      title = readable.title;
+      body = htmlToMarkdown(readable.html || text, response.finalUrl);
       lines.push("Format: HTML as Markdown");
+      if (readable.source) lines.push("Readable source: " + readable.source + "; score=" + readable.score);
+    } else if (extract === "text") {
+      title = htmlTitle(text);
+      body = stripTagsToText(text);
+      lines.push("Format: HTML text");
     } else {
       const readable = readableHtml(text);
       title = readable.title;
       body = readable.body;
-      lines.push("Format: HTML text");
+      lines.push("Format: HTML readable text");
+      if (readable.source) lines.push("Readable source: " + readable.source + "; score=" + readable.score);
     }
   } else if (extract !== "raw") {
     lines.push("Format: text");
@@ -884,7 +1274,10 @@ function sendError(id, code, message) { send({ jsonrpc: "2.0", id, error: { code
 async function callTool(name, args) {
   if (name === "proxy_status") return proxyStatus(args);
   if (name === "pdf_status") return pdfStatus(args);
+  if (name === "search_status") return searchStatus(args);
   if (name === "search_web") return searchWeb(args);
+  if (name === "scholar_search") return scholarSearch(args);
+  if (name === "package_search") return packageSearch(args);
   if (name === "fetch_url") return fetchUrl(args);
   if (name === "extract_links") return extractLinks(args);
   if (name === "fetch_json") return fetchJson(args);

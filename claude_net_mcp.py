@@ -28,14 +28,27 @@ from html.parser import HTMLParser
 from typing import Any
 
 SERVER_NAME = "claude-code-net-tools"
-SERVER_VERSION = "0.5.1"
+SERVER_VERSION = "0.6.0"
 DEFAULT_TIMEOUT = float(os.environ.get("CLAUDE_NET_TIMEOUT", "20"))
 SEARCH_TIMEOUT = float(os.environ.get("CLAUDE_NET_SEARCH_TIMEOUT", "15"))
 MAX_FETCH_BYTES = int(os.environ.get("CLAUDE_NET_MAX_FETCH_BYTES", "900000"))
 COMMON_LOCAL_PROXY_PORTS = (7890, 7897, 7899, 10809, 10808, 1080, 8080, 20171, 2080)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 TRANSPORT_MODE = ""
-
+PROVIDER_FAIL_LIMIT = max(1, min(int(os.environ.get("CLAUDE_NET_PROVIDER_FAIL_LIMIT", "3")), 10))
+PROVIDER_STATS: dict[str, dict[str, Any]] = {}
+SEARCH_PROVIDER_META = {
+    "kimi": {"kind": "api", "env": ["KIMI_API_KEY", "MOONSHOT_API_KEY"], "description": "Kimi/Moonshot web search API"},
+    "minimax": {"kind": "api", "env": ["MINIMAX_API_KEY"], "description": "MiniMax web search API"},
+    "brave": {"kind": "api", "env": ["BRAVE_SEARCH_API_KEY"], "description": "Brave Search API"},
+    "serper": {"kind": "api", "env": ["SERPER_API_KEY", "GOOGLE_SERPER_API_KEY"], "description": "Serper Google Search API"},
+    "tavily": {"kind": "api", "env": ["TAVILY_API_KEY"], "description": "Tavily Search API"},
+    "duckduckgo": {"kind": "free", "env": [], "description": "DuckDuckGo HTML fallback"},
+    "bing_rss": {"kind": "free", "env": [], "description": "Bing RSS fallback"},
+    "bing_html": {"kind": "free", "env": [], "description": "Bing HTML fallback"},
+    "sogou": {"kind": "free", "env": [], "description": "Sogou HTML fallback"},
+    "so360": {"kind": "free", "env": [], "description": "360 Search HTML fallback"},
+}
 
 def _json_dump(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -547,40 +560,339 @@ def _search_so360(query: str, count: int) -> list[dict[str, str]]:
     return _parse_generic_html(_decode_body(body, content_type), count, "so360")
 
 
+def _normalize_provider_name(provider: Any) -> str:
+    value = str(provider or "").strip().lower().replace("-", "_")
+    aliases = {"ddg": "duckduckgo", "bing": "bing_html", "360": "so360", "semantic": "semantic_scholar", "semanticscholar": "semantic_scholar", "ss": "semantic_scholar", "github_repos": "github"}
+    return aliases.get(value, value)
+
+
+def _split_list(value: Any) -> list[str]:
+    return [part.strip() for part in re.split(r"[;,]", str(value or "")) if part.strip()]
+
+
+def _disabled_provider_set() -> set[str]:
+    return {_normalize_provider_name(item) for item in _split_list(os.environ.get("CLAUDE_NET_DISABLED_PROVIDERS", ""))}
+
+
+def _provider_availability(provider: Any) -> dict[str, Any]:
+    name = _normalize_provider_name(provider)
+    if name in _disabled_provider_set():
+        return {"available": False, "reason": "disabled by CLAUDE_NET_DISABLED_PROVIDERS"}
+    meta = SEARCH_PROVIDER_META.get(name)
+    if not meta:
+        return {"available": False, "reason": "unknown provider"}
+    envs = meta.get("env") or []
+    if envs and not any(os.environ.get(key) for key in envs):
+        return {"available": False, "reason": "missing env: " + " or ".join(envs)}
+    return {"available": True, "reason": "configured"}
+
+
+def _provider_stats(provider: Any) -> dict[str, Any]:
+    name = _normalize_provider_name(provider)
+    if name not in PROVIDER_STATS:
+        PROVIDER_STATS[name] = {"success": 0, "failure": 0, "consecutiveFailures": 0, "lastMs": 0, "lastCount": 0, "lastError": "", "lastAt": ""}
+    return PROVIDER_STATS[name]
+
+
+def _record_provider(provider: Any, ok: bool, elapsed_ms: int, count: int = 0, error: str = "") -> None:
+    stats = _provider_stats(provider)
+    if ok:
+        stats["success"] += 1
+        stats["consecutiveFailures"] = 0
+        stats["lastError"] = ""
+    else:
+        stats["failure"] += 1
+        stats["consecutiveFailures"] += 1
+        stats["lastError"] = str(error or "unknown error")[:240]
+    stats["lastMs"] = elapsed_ms
+    stats["lastCount"] = count
+    stats["lastAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _dedupe_providers(providers: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for provider in providers:
+        name = _normalize_provider_name(provider)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _provider_order(query: str, override: Any) -> list[str]:
     if isinstance(override, list) and override:
-        return [str(x) for x in override]
+        return _dedupe_providers(override)
     env = os.environ.get("CLAUDE_NET_SEARCH_PROVIDERS", "").strip()
     if env:
-        return [x.strip() for x in re.split(r"[;,]", env) if x.strip()]
+        return _dedupe_providers(_split_list(env))
     if _is_cjk(query):
         return ["duckduckgo", "sogou", "so360", "bing_html", "bing_rss"]
     return ["duckduckgo", "bing_rss", "bing_html"]
 
 
+def _active_provider_order(query: str, override: Any, notes: list[str], ignore_failure_limit: bool = False) -> list[str]:
+    explicit = isinstance(override, list) and bool(override)
+    out: list[str] = []
+    for provider in _provider_order(query, override):
+        availability = _provider_availability(provider)
+        if not availability["available"]:
+            notes.append(f"{provider}: skipped ({availability['reason']})")
+            continue
+        stats = _provider_stats(provider)
+        if not explicit and not ignore_failure_limit and stats["consecutiveFailures"] >= PROVIDER_FAIL_LIMIT:
+            notes.append(f"{provider}: skipped after {stats['consecutiveFailures']} consecutive failure(s); run search_status live=true to refresh")
+            continue
+        out.append(provider)
+    return out
+
+
 def _run_provider(provider: str, query: str, count: int) -> list[dict[str, str]]:
-    if provider == "kimi":
+    name = _normalize_provider_name(provider)
+    if name == "kimi":
         return _search_chat_web(query, count, "kimi")
-    if provider == "minimax":
+    if name == "minimax":
         return _search_chat_web(query, count, "minimax")
-    if provider == "brave":
+    if name == "brave":
         return _search_brave(query, count)
-    if provider == "serper":
+    if name == "serper":
         return _search_serper(query, count)
-    if provider == "tavily":
+    if name == "tavily":
         return _search_tavily(query, count)
-    if provider in {"duckduckgo", "ddg"}:
+    if name == "duckduckgo":
         return _search_duckduckgo(query, count)
-    if provider == "bing_rss":
+    if name == "bing_rss":
         return _search_bing_rss(query, count)
-    if provider in {"bing", "bing_html"}:
+    if name == "bing_html":
         return _search_bing_html(query, count)
-    if provider == "sogou":
+    if name == "sogou":
         return _search_sogou(query, count)
-    if provider in {"so360", "360"}:
+    if name == "so360":
         return _search_so360(query, count)
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def _run_provider_tracked(provider: str, query: str, count: int) -> list[dict[str, str]]:
+    started = time.time()
+    try:
+        rows = _run_provider(provider, query, count)
+        _record_provider(provider, True, int((time.time() - started) * 1000), len(rows))
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        _record_provider(provider, False, int((time.time() - started) * 1000), 0, str(exc))
+        raise
+
+
+def search_status(arguments: dict[str, Any]) -> str:
+    query = str(arguments.get("query") or "Claude Code MCP").strip() or "Claude Code MCP"
+    providers = _dedupe_providers(arguments.get("providers") if isinstance(arguments.get("providers"), list) and arguments.get("providers") else list(SEARCH_PROVIDER_META.keys()))
+    lines = ["Search provider status:", "Default non-CJK order: " + ", ".join(_provider_order("test", [])), "Default CJK order: " + ", ".join(_provider_order("测试", [])), f"Failure skip threshold: {PROVIDER_FAIL_LIMIT}", ""]
+    live = _as_bool(arguments.get("live"))
+    for provider in providers:
+        availability = _provider_availability(provider)
+        if live and availability["available"]:
+            try:
+                _run_provider_tracked(provider, query, 1)
+            except Exception:
+                pass
+        stats = _provider_stats(provider)
+        meta = SEARCH_PROVIDER_META.get(provider, {})
+        pieces = [f"- {provider}", f"kind={meta.get('kind', 'unknown')}", f"available={availability['available']}", f"reason={availability['reason']}", f"success={stats['success']}", f"failure={stats['failure']}", f"consecutiveFailures={stats['consecutiveFailures']}"]
+        if stats.get("lastAt"):
+            pieces.append(f"last={stats['lastCount']} result(s) in {stats['lastMs']}ms at {stats['lastAt']}")
+        if stats.get("lastError"):
+            pieces.append("lastError=" + stats["lastError"])
+        lines.append("; ".join(pieces))
+    if not live:
+        lines.extend(["", "Set live=true to run one-result health probes for available providers."])
+    return "\n".join(lines)
+
+
+def _search_semantic_scholar(query: str, count: int) -> list[dict[str, str]]:
+    fields = "title,url,abstract,year,venue,authors,externalIds,openAccessPdf"
+    _, content_type, body, _, _ = _request_url("https://api.semanticscholar.org/graph/v1/paper/search?" + urllib.parse.urlencode({"query": query, "limit": count, "fields": fields}), timeout=15, max_bytes=1200000, headers={"Accept": "application/json"})
+    data = json.loads(_decode_body(body, content_type))
+    rows = []
+    for item in data.get("data", []):
+        arxiv = "https://arxiv.org/abs/" + item.get("externalIds", {}).get("ArXiv", "") if item.get("externalIds", {}).get("ArXiv") else ""
+        pdf = (item.get("openAccessPdf") or {}).get("url") or ""
+        authors = ", ".join(author.get("name", "") for author in (item.get("authors") or [])[:4] if author.get("name"))
+        snippet = " | ".join(str(x) for x in (item.get("year"), item.get("venue"), authors, item.get("abstract")) if x)
+        rows.append(_result(item.get("title"), pdf or item.get("url") or arxiv, snippet, "semantic_scholar"))
+    return rows
+
+
+def _search_crossref(query: str, count: int) -> list[dict[str, str]]:
+    _, content_type, body, _, _ = _request_url("https://api.crossref.org/works?" + urllib.parse.urlencode({"query": query, "rows": count}), timeout=15, max_bytes=1200000, headers={"Accept": "application/json"})
+    data = json.loads(_decode_body(body, content_type))
+    rows = []
+    for item in data.get("message", {}).get("items", []):
+        title = (item.get("title") or [""])[0]
+        container = (item.get("container-title") or [""])[0]
+        year = ((item.get("published") or {}).get("date-parts") or [[""]])[0][0] or ((item.get("created") or {}).get("date-parts") or [[""]])[0][0]
+        doi = "DOI: " + item.get("DOI", "") if item.get("DOI") else ""
+        rows.append(_result(title, item.get("URL"), " | ".join(str(x) for x in (year, container, doi) if x), "crossref"))
+    return rows
+
+
+def _parse_arxiv_entries(text: str, count: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for match in re.finditer(r"<entry\b[\s\S]*?</entry>", text, flags=re.I):
+        block = match.group(0)
+        title = _tag_text(block, "title")
+        abs_url = _tag_text(block, "id")
+        summary = _tag_text(block, "summary")
+        published = _tag_text(block, "published") or _tag_text(block, "updated")
+        pdf_match = re.search(r"<link\b[^>]*title=[\"']pdf[\"'][^>]*href=[\"']([^\"']+)[\"']", block, flags=re.I)
+        pdf = pdf_match.group(1) if pdf_match else ""
+        rows.append(_result(title, pdf or abs_url, " | ".join(x for x in (published, summary) if x), "arxiv"))
+        if len(rows) >= count:
+            break
+    return rows
+
+
+def _search_arxiv(query: str, count: int) -> list[dict[str, str]]:
+    cleaned = _normalize_space(query).replace('"', "")
+    attempts: list[str] = []
+    if " " in cleaned:
+        attempts.append(f'ti:"{cleaned}"')
+    attempts.append("all:" + query)
+    notes: list[str] = []
+    for search_query in attempts:
+        try:
+            _, content_type, body, _, _ = _request_url("https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"search_query": search_query, "start": 0, "max_results": count}), timeout=20, max_bytes=1200000, headers={"Accept": "application/atom+xml,application/xml"})
+            rows = _parse_arxiv_entries(_decode_body(body, content_type), count)
+            if rows:
+                return rows
+            notes.append(f"{search_query}: 0 result(s)")
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{search_query}: {exc}")
+    if notes:
+        raise ValueError("; ".join(notes))
     return []
 
+
+def _scholar_provider(provider: str, query: str, count: int) -> list[dict[str, str]]:
+    name = _normalize_provider_name(provider)
+    if name == "semantic_scholar":
+        return _search_semantic_scholar(query, count)
+    if name == "crossref":
+        return _search_crossref(query, count)
+    if name == "arxiv":
+        return _search_arxiv(query, count)
+    raise ValueError(f"Unknown scholar provider: {provider}")
+
+
+def scholar_search(arguments: dict[str, Any]) -> str:
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+    count = max(1, min(int(arguments.get("count", 5)), 10))
+    providers = _dedupe_providers(arguments.get("providers") if isinstance(arguments.get("providers"), list) and arguments.get("providers") else ["arxiv", "semantic_scholar", "crossref"])
+    notes: list[str] = []
+    rows: list[dict[str, str]] = []
+    for provider in providers:
+        try:
+            found = _scholar_provider(provider, query, count)
+            notes.append(f"{provider}: {len(found)} result(s)")
+            rows = _dedupe(rows + found)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{provider}: {exc}")
+    return _format_result_rows("Scholar results for: " + query, _rank_rows(rows, query)[:count], notes)
+
+
+def _search_npm_packages(query: str, count: int) -> list[dict[str, str]]:
+    _, content_type, body, _, _ = _request_url("https://registry.npmjs.org/-/v1/search?" + urllib.parse.urlencode({"text": query, "size": count}), timeout=15, max_bytes=1200000, headers={"Accept": "application/json"})
+    data = json.loads(_decode_body(body, content_type))
+    rows = []
+    for item in data.get("objects", []):
+        pkg = item.get("package") or {}
+        score = f"score {item.get('score', {}).get('final'):.3f}" if item.get("score", {}).get("final") else ""
+        rows.append(_result((pkg.get("name") or "(unnamed)") + " " + (pkg.get("version") or ""), (pkg.get("links") or {}).get("npm") or "https://www.npmjs.com/package/" + str(pkg.get("name") or ""), " | ".join(x for x in (pkg.get("description"), score) if x), "npm"))
+    return rows
+
+
+def _search_github_repos(query: str, count: int) -> list[dict[str, str]]:
+    _, content_type, body, _, _ = _request_url("https://api.github.com/search/repositories?" + urllib.parse.urlencode({"q": query, "per_page": count}), timeout=15, max_bytes=1200000, headers={"Accept": "application/vnd.github+json"})
+    data = json.loads(_decode_body(body, content_type))
+    return [_result(item.get("full_name"), item.get("html_url"), " | ".join(str(x) for x in (item.get("description"), str(item.get("stargazers_count", 0)) + " stars", item.get("language")) if x), "github") for item in data.get("items", [])]
+
+
+def _parse_pypi_html(text: str, count: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for match in re.finditer(r"<a\b(?=[^>]*class=[\"'][^\"']*package-snippet)(?=[^>]*href=[\"']([^\"']+)[\"'])[^>]*>([\s\S]*?)</a>", text, flags=re.I):
+        block = match.group(2)
+        name = _tag_text(block, "span") or _tag_text(block, "h3") or (_strip_tags(block).splitlines() or [""])[0]
+        version_match = re.search(r"package-snippet__version[^>]*>([\s\S]*?)</", block, flags=re.I)
+        desc_match = re.search(r"package-snippet__description[^>]*>([\s\S]*?)</", block, flags=re.I)
+        rows.append(_result(" ".join(x for x in (name, _strip_tags(version_match.group(1)) if version_match else "") if x), urllib.parse.urljoin("https://pypi.org", match.group(1)), _strip_tags(desc_match.group(1)) if desc_match else "", "pypi"))
+        if len(rows) >= count:
+            break
+    return rows
+
+
+def _search_pypi_packages(query: str, count: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if re.match(r"^[A-Za-z0-9_.-]+$", query):
+        try:
+            _, content_type, body, _, _ = _request_url("https://pypi.org/pypi/" + urllib.parse.quote(query) + "/json", timeout=12, max_bytes=1200000, headers={"Accept": "application/json"})
+            data = json.loads(_decode_body(body, content_type))
+            info = data.get("info") or {}
+            rows.append(_result((info.get("name") or query) + " " + (info.get("version") or ""), info.get("package_url") or "https://pypi.org/project/" + query + "/", info.get("summary") or "", "pypi"))
+        except Exception:
+            pass
+    if len(rows) < count:
+        _, content_type, body, _, _ = _request_url("https://pypi.org/search/?" + urllib.parse.urlencode({"q": query}), timeout=15, max_bytes=1200000)
+        rows.extend(_parse_pypi_html(_decode_body(body, content_type), count - len(rows)))
+    return _dedupe(rows)[:count]
+
+
+def _package_provider(provider: str, query: str, count: int) -> list[dict[str, str]]:
+    name = _normalize_provider_name(provider)
+    if name == "npm":
+        return _search_npm_packages(query, count)
+    if name == "pypi":
+        return _search_pypi_packages(query, count)
+    if name == "github":
+        return _search_github_repos(query, count)
+    raise ValueError(f"Unknown package provider: {provider}")
+
+
+def package_search(arguments: dict[str, Any]) -> str:
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+    count = max(1, min(int(arguments.get("count", 5)), 10))
+    ecosystem = str(arguments.get("ecosystem", "all")).lower()
+    defaults = ["npm"] if ecosystem == "npm" else ["pypi"] if ecosystem == "pypi" else ["github"] if ecosystem == "github" else ["npm", "pypi", "github"]
+    providers = _dedupe_providers(arguments.get("providers") if isinstance(arguments.get("providers"), list) and arguments.get("providers") else defaults)
+    notes: list[str] = []
+    rows: list[dict[str, str]] = []
+    for provider in providers:
+        try:
+            found = _package_provider(provider, query, count)
+            notes.append(f"{provider}: {len(found)} result(s)")
+            rows = _dedupe(rows + found)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{provider}: {exc}")
+    return _format_result_rows("Package results for: " + query, rows[:count], notes)
+
+
+def _format_result_rows(title: str, rows: list[dict[str, str]], notes: list[str]) -> str:
+    if not rows:
+        return "\n".join([title, "", "No results.", "", "Provider notes:", *[f"- {note}" for note in notes]])
+    lines = [title, ""]
+    for index, row in enumerate(rows, start=1):
+        lines.append(f"{index}. {row.get('title') or '(untitled)'}")
+        lines.append(f"   URL: {row.get('url') or ''}")
+        lines.append(f"   Provider: {row.get('provider') or 'unknown'}")
+        if row.get("snippet"):
+            lines.append(f"   Snippet: {row['snippet']}")
+    if notes:
+        lines.extend(["", "Provider notes:"])
+        lines.extend(f"- {note}" for note in notes[:12])
+    return "\n".join(lines)
 
 def search_web(arguments: dict[str, Any]) -> str:
     query = str(arguments.get("query", "")).strip()
@@ -593,18 +905,18 @@ def search_web(arguments: dict[str, Any]) -> str:
     core = _core_query(query)
     if _is_cjk(query) and core and core != query:
         queries.extend([f'"{core}"', core])
-    providers = _provider_order(query, arguments.get("providers"))
-    provider_count = max(1, (count + 1) // 2) if (not rerank and _is_cjk(query) and len(providers) > 1) else candidate_count
     notes: list[str] = []
     if rerank:
         notes.append("rerank: enabled (heuristic result ordering)")
+    providers = _active_provider_order(query, arguments.get("providers"), notes)
+    provider_count = max(1, (count + 1) // 2) if (not rerank and _is_cjk(query) and len(providers) > 1) else candidate_count
     rows: list[dict[str, str]] = []
     for q in queries:
         for provider in providers:
             if not _is_cjk(query) and len(rows) >= count:
                 break
             try:
-                raw = _run_provider(provider, q, provider_count)
+                raw = _run_provider_tracked(provider, q, provider_count)
                 relevant = _filter_relevant_results(raw, query)
                 if raw and not relevant:
                     notes.append(f"{provider}: ignored {len(raw)} low-relevance result(s)")
@@ -621,19 +933,7 @@ def search_web(arguments: dict[str, Any]) -> str:
     rows = rows[:count]
     if not rows:
         return "\n".join([f"No search results for {query!r}.", "", "Provider notes:", *[f"- {note}" for note in notes]])
-    lines = [f"Search results for: {query}", ""]
-    for index, row in enumerate(rows, start=1):
-        lines.append(f"{index}. {row['title']}")
-        lines.append(f"   URL: {row['url']}")
-        lines.append(f"   Provider: {row.get('provider') or 'unknown'}")
-        if row.get("snippet"):
-            lines.append(f"   Snippet: {row['snippet']}")
-    if notes:
-        lines.append("")
-        lines.append("Provider notes:")
-        lines.extend(f"- {note}" for note in notes[:12])
-    return "\n".join(lines)
-
+    return _format_result_rows(f"Search results for: {query}", rows, notes)
 
 class TextExtractor(HTMLParser):
     SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas"}
@@ -709,6 +1009,72 @@ def _request_options(arguments: dict[str, Any], defaults: dict[str, Any] | None 
 def _html_title(text: str) -> str:
     match = re.search(r"<title[^>]*>([\s\S]*?)</title>", text, flags=re.I)
     return _normalize_space(_strip_tags(match.group(1))) if match else ""
+
+
+def _strip_tags_to_text(value: str) -> str:
+    cleaned = re.sub(r"<!--[\s\S]*?-->", " ", value or "")
+    cleaned = re.sub(r"<script[\s\S]*?</script>", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<style[\s\S]*?</style>", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<noscript[\s\S]*?</noscript>", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<(nav|header|footer|aside|form|svg|canvas)[\s\S]*?</\1>", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<(br|hr)\b[^>]*>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"</(p|div|section|article|li|tr|h[1-6])>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    lines = [_normalize_space(line) for line in html.unescape(cleaned).splitlines() if _normalize_space(line)]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _clean_readable_html(text: str) -> str:
+    value = re.sub(r"<!--[\s\S]*?-->", " ", text or "")
+    value = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.I)
+    value = re.sub(r"<style[\s\S]*?</style>", " ", value, flags=re.I)
+    value = re.sub(r"<noscript[\s\S]*?</noscript>", " ", value, flags=re.I)
+    value = re.sub(r"<(nav|header|footer|aside|form|svg|canvas)[\s\S]*?</\1>", " ", value, flags=re.I)
+    return value
+
+
+def _readable_candidates(text: str) -> list[dict[str, str]]:
+    cleaned = _clean_readable_html(text)
+    candidates: list[dict[str, str]] = []
+    patterns = [
+        ("article", r"<article\b[^>]*>[\s\S]*?</article>"),
+        ("main", r"<main\b[^>]*>[\s\S]*?</main>"),
+        ("role-main", r"<([a-z0-9]+)\b[^>]*role=[\"']main[\"'][^>]*>[\s\S]*?</\1>"),
+        ("content", r"<(article|main|section|div)\b[^>]*(?:id|class)=[\"'][^\"']*(?:article|content|entry|post|main|story|text|body)[^\"']*[\"'][^>]*>[\s\S]*?</\1>"),
+    ]
+    for label, pattern in patterns:
+        for match in re.finditer(pattern, cleaned, flags=re.I):
+            candidates.append({"label": label, "html": match.group(0)})
+            if len(candidates) >= 80:
+                break
+        if len(candidates) >= 80:
+            break
+    body_match = re.search(r"<body\b[^>]*>([\s\S]*?)</body>", cleaned, flags=re.I)
+    candidates.append({"label": "body", "html": body_match.group(1) if body_match else cleaned})
+    return candidates
+
+
+def _readable_score(candidate: dict[str, str]) -> dict[str, Any]:
+    text = _strip_tags_to_text(candidate["html"])
+    length = len(text)
+    if length < 80:
+        return {**candidate, "text": text, "score": 0}
+    link_text = _strip_tags_to_text(" ".join(re.findall(r"<a\b[\s\S]*?</a>", candidate["html"], flags=re.I)))
+    link_density = len(link_text) / max(length, 1)
+    paragraph_count = len(re.findall(r"<p\b", candidate["html"], flags=re.I))
+    positive = 250 if re.search(r"article|content|entry|post|main|story|text|body|markdown|readme", candidate["html"], flags=re.I) else 0
+    negative = 250 if re.search(r"comment|reply|sidebar|footer|header|nav|menu|related|advert|promo|share", candidate["html"], flags=re.I) else 0
+    score = length + paragraph_count * 120 + positive - negative - round(link_density * length * 1.8)
+    return {**candidate, "text": text, "score": score}
+
+
+def _readable_html(text: str) -> dict[str, Any]:
+    title = _html_title(text)
+    scored = sorted((_readable_score(candidate) for candidate in _readable_candidates(text)), key=lambda item: item["score"], reverse=True)
+    fallback = _strip_tags_to_text(text)
+    best = scored[0] if scored else {"label": "document", "html": text, "text": fallback, "score": 0}
+    use_best = bool(best.get("text")) and len(best["text"]) >= min(500, max(160, int(len(fallback) * 0.12)))
+    return {"title": title, "body": best["text"] if use_best else fallback, "html": best["html"] if use_best else text, "source": best["label"] if use_best else "document", "score": max(0, round(best.get("score") or 0))}
 
 
 def _html_to_markdown(text: str, base_url: str) -> str:
@@ -814,14 +1180,25 @@ def _format_fetched_content(final_url: str, content_type: str, body: bytes, rout
     elif extract != "raw" and ("html" in content_type.lower() or "<html" in text[:1000].lower()):
         title = _html_title(text)
         if extract == "markdown":
-            output = _html_to_markdown(text, final_url)
+            readable = _readable_html(text)
+            output = _html_to_markdown(readable.get("html") or text, final_url)
+            title = title or readable.get("title", "")
             lines.append("Format: HTML as Markdown")
-        else:
+            if readable.get("source"):
+                lines.append(f"Readable source: {readable['source']}; score={readable['score']}")
+        elif extract == "text":
             parser = TextExtractor()
             parser.feed(text)
             parsed_title, output = parser.text()
             title = title or parsed_title
             lines.append("Format: HTML text")
+        else:
+            readable = _readable_html(text)
+            title = title or readable.get("title", "")
+            output = readable.get("body") or ""
+            lines.append("Format: HTML readable text")
+            if readable.get("source"):
+                lines.append(f"Readable source: {readable['source']}; score={readable['score']}")
     elif extract != "raw":
         lines.append("Format: text")
     else:
@@ -1001,8 +1378,11 @@ def proxy_status(arguments: dict[str, Any]) -> str:
 TOOLS = [
     {"name": "proxy_status", "description": "Show which local VPN/proxy routes this server will try before direct connection.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "pdf_status", "description": "Check the local PDF text extraction command used by fetch_pdf.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "search_status", "description": "Show search provider availability, recent failures, and optional live health probes.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": "Claude Code MCP"}, "providers": {"type": "array", "items": {"type": "string"}}, "live": {"type": "boolean", "default": False, "description": "When true, run a one-result live probe for available providers."}}}},
     {"name": "search_web", "description": "Search the public web with API providers and free HTML/RSS fallbacks.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "rerank": {"type": "boolean", "default": False}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
-    {"name": "fetch_url", "description": "Fetch a URL and return readable text, JSON, RSS, or raw content.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 12000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "text", "markdown", "raw"], "default": "auto"}}, "required": ["url"]}},
+    {"name": "scholar_search", "description": "Search academic papers through specialized providers such as Semantic Scholar, Crossref, and arXiv.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}, "description": "semantic_scholar, crossref, arxiv"}}, "required": ["query"]}},
+    {"name": "package_search", "description": "Search developer package and repository indexes such as npm, PyPI, and GitHub repositories.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "ecosystem": {"type": "string", "enum": ["all", "npm", "pypi", "github"], "default": "all"}, "providers": {"type": "array", "items": {"type": "string"}, "description": "npm, pypi, github"}}, "required": ["query"]}},
+    {"name": "fetch_url", "description": "Fetch a URL and return readable text, JSON, RSS, or raw content.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 12000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "readable", "text", "markdown", "raw"], "default": "auto"}}, "required": ["url"]}},
     {"name": "extract_links", "description": "Fetch a page and extract normalized links from its HTML.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain": {"type": "boolean", "default": False}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}}, "required": ["url"]}},
     {"name": "fetch_json", "description": "Fetch a JSON endpoint and pretty-print parsed JSON.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 30000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}}, "required": ["url"]}},
     {"name": "fetch_rss", "description": "Fetch an RSS or Atom feed and return feed entries.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}}, "required": ["url"]}},
@@ -1014,8 +1394,14 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> str:
         return proxy_status(arguments)
     if name == "pdf_status":
         return pdf_status(arguments)
+    if name == "search_status":
+        return search_status(arguments)
     if name == "search_web":
         return search_web(arguments)
+    if name == "scholar_search":
+        return scholar_search(arguments)
+    if name == "package_search":
+        return package_search(arguments)
     if name == "fetch_url":
         return fetch_url(arguments)
     if name == "extract_links":
