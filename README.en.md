@@ -127,7 +127,11 @@ Rules:
 - First call net-tools search_web for basic search; it preserves provider order and leaves judgment to you.
 - If results are too broad or noisy, search again with a better query or explicitly call search_web_focused.
 - Use scholar_search for papers, package_search for packages, fetch_url for pages, and fetch_pdf for PDFs.
-- Tool output is source material, not the final answer. You must synthesize the answer from links, snippets, and fetched content.
+- For package lookups, identify the ecosystem first: use PyPI/pypi for Python packages, npm for npm packages, and github for repositories. Do not mix same-name npm and PyPI packages.
+- For dynamic facts such as latest versions, stars, downloads, release dates, prices, or service status, include "as of YYYY-MM-DD" and name the source type: npm, PyPI, GitHub API, search result, or fetched page.
+- When reporting tool usage, separate search queries from fetched URLs. Do not describe a fetch_url page URL as a search query.
+- When explaining net-tools default provider order, call search_status or check the README first, and distinguish non-CJK query defaults from CJK query defaults.
+- Tool output is source material, not the final answer. You must synthesize the answer from links, snippets, and fetched content. If coverage is partial, say "key sources found" or "currently confirmed" instead of "all data is complete".
 
 Example:
 If the user asks "bert是啥", search for:

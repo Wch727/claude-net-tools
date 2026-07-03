@@ -127,7 +127,11 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 - 先调用 net-tools search_web 执行基础搜索，保留原始 provider 顺序；不要依赖工具替你判断结果好坏。
 - 如果结果太泛或太吵，再用更具体的 query 重搜，或显式调用 search_web_focused。
 - 论文用 scholar_search，软件包用 package_search，网页正文用 fetch_url，PDF 用 fetch_pdf。
-- 工具返回的是材料，不是最终答案；最终答案必须由你综合结果、链接和上下文判断。
+- 查软件包时必须先判断生态：Python 包显式用 PyPI/pypi，npm 包显式用 npm，GitHub 仓库显式用 github；不要把同名 npm 包和 PyPI 包混用。
+- 涉及“最新版本、stars、下载量、发布日期、价格、状态”等动态信息时，必须写明“截至 YYYY-MM-DD”，并说明来源是 npm、PyPI、GitHub API、搜索结果还是页面抓取。
+- 记录工具调用时要区分 search query 和 fetch URL；不要把 fetch_url 读取的页面 URL 写成搜索 query。
+- 解释 net-tools 默认 provider 顺序时，先调用 search_status 或查 README，并区分非中文 query 和中文 query 的默认顺序。
+- 工具返回的是材料，不是最终答案；最终答案必须由你综合结果、链接和上下文判断。资料不完整时用“关键资料已查到/目前可确认”，不要写“数据全部到位”。
 
 例子：
 用户问“bert是啥”时，可以先搜索：
