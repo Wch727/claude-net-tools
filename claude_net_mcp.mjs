@@ -9,13 +9,14 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SERVER_NAME = "claude-code-net-tools";
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.5.1";
 const COMMON_LOCAL_PROXY_PORTS = [7890, 7897, 7899, 10809, 10808, 1080, 8080, 20171, 2080];
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 const CURL = process.env.CLAUDE_NET_CURL || "curl.exe";
 
 const TOOLS = [
   { name: "proxy_status", description: "Show local VPN/proxy routes and provider order.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "pdf_status", description: "Check the local PDF text extraction command used by fetch_pdf.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   {
     name: "search_web",
     description: "Search the public web with API providers and free HTML/RSS fallbacks.",
@@ -119,6 +120,7 @@ const TOOLS = [
         headers: { type: "object", additionalProperties: { type: "string" } },
         cookies: { description: "Cookie header string or object of cookie name/value pairs." },
         cookie_jar: { type: "string" },
+        extractor: { type: "string", enum: ["auto", "pdftotext", "none"], default: "auto", description: "PDF extraction mode. Use none to only verify/download the PDF." },
       },
       required: ["url"],
       additionalProperties: false,
@@ -807,10 +809,37 @@ async function fileStartsWithPdf(filePath) {
   }
 }
 
+function pdfTextTool() {
+  return process.env.CLAUDE_NET_PDFTOTEXT || "pdftotext";
+}
+
+function trimDiagnostic(text, maxChars = 1600) {
+  return normalizeSpace(String(text || "")).slice(0, maxChars) || "(no output)";
+}
+
+async function pdfStatus() {
+  const tool = pdfTextTool();
+  const lines = ["PDF extraction status:", `Command: ${tool}`];
+  if (process.env.CLAUDE_NET_PDFTOTEXT) lines.push("Source: CLAUDE_NET_PDFTOTEXT");
+  else lines.push("Source: PATH lookup for pdftotext");
+  try {
+    const { stdout, stderr } = await execFileAsync(tool, ["-v"], { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 65536 });
+    lines.push("Status: available");
+    lines.push(`Version output: ${trimDiagnostic(`${stdout}\n${stderr}`)}`);
+  } catch (error) {
+    lines.push("Status: unavailable or failed");
+    lines.push(`Error: ${error.message}`);
+  }
+  lines.push("Tip: install Poppler pdftotext, put it on PATH, or set CLAUDE_NET_PDFTOTEXT to the exact executable path. Use fetch_pdf with extractor=none to verify PDF downloads without text extraction.");
+  return lines.join("\n");
+}
+
 async function fetchPdf(args) {
   const url = ensureUrl(args?.url);
   const maxChars = Math.max(500, Math.min(Number(args?.max_chars) || 30000, 100000));
   const timeout = Math.max(1, Math.min(Number(args?.timeout) || 30, 120));
+  const extractor = String(args?.extractor || "auto").toLowerCase();
+  if (!["auto", "pdftotext", "none"].includes(extractor)) throw new Error("extractor must be auto, pdftotext, or none");
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ccnet-pdf-"));
   const pdfPath = path.join(tmpDir, "source.pdf");
   try {
@@ -821,16 +850,19 @@ async function fetchPdf(args) {
     }
     const contentType = String(response.contentType || "").toLowerCase();
     if (!contentType.includes("pdf") && !(await fileStartsWithPdf(pdfPath))) {
-      return [...baseLines, "", "Downloaded content does not look like a PDF; not running pdftotext."].join("\n");
+      return [...baseLines, "", "Downloaded content does not look like a PDF; not running PDF text extraction."].join("\n");
     }
-    const tool = process.env.CLAUDE_NET_PDFTOTEXT || "pdftotext";
+    if (extractor === "none") {
+      return [...baseLines, "Format: PDF", "", "PDF downloaded and validated. Text extraction was skipped because extractor=none."].join("\n");
+    }
+    const tool = pdfTextTool();
     let stdout;
     try {
       ({ stdout } = await execFileAsync(tool, ["-layout", pdfPath, "-"], { encoding: "utf8", windowsHide: true, maxBuffer: maxChars + 65536, timeout: (timeout + 5) * 1000 }));
     } catch (error) {
-      return [`URL: ${response.finalUrl}`, `Route: ${response.route}`, response.status ? `Status: ${response.status}` : "", `Content-Type: ${response.contentType || "unknown"}`, "", `PDF downloaded, but text extraction failed. Install Poppler pdftotext or set CLAUDE_NET_PDFTOTEXT. Error: ${error.message}`].filter(Boolean).join("\n");
+      return [...baseLines, `Extractor: ${tool}`, "", `PDF downloaded, but text extraction failed. Run pdf_status for local extractor diagnostics, install Poppler pdftotext, or set CLAUDE_NET_PDFTOTEXT. Error: ${error.message}`].join("\n");
     }
-    return [`URL: ${response.finalUrl}`, `Route: ${response.route}`, response.status ? `Status: ${response.status}` : "", `Content-Type: ${response.contentType || "unknown"}`, "Format: PDF text", "", (stdout || "(No extractable text.)").slice(0, maxChars)].filter(Boolean).join("\n");
+    return [...baseLines, `Extractor: ${tool}`, "Format: PDF text", "", (stdout || "(No extractable text.)").slice(0, maxChars)].join("\n");
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -851,6 +883,7 @@ function sendError(id, code, message) { send({ jsonrpc: "2.0", id, error: { code
 
 async function callTool(name, args) {
   if (name === "proxy_status") return proxyStatus(args);
+  if (name === "pdf_status") return pdfStatus(args);
   if (name === "search_web") return searchWeb(args);
   if (name === "fetch_url") return fetchUrl(args);
   if (name === "extract_links") return extractLinks(args);

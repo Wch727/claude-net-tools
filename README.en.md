@@ -40,7 +40,7 @@ Not required:
 
 Optional:
 
-- Poppler `pdftotext`: needed by `fetch_pdf` to extract PDF text. Put `pdftotext` on PATH, or set `CLAUDE_NET_PDFTOTEXT` to the executable path.
+- Poppler `pdftotext`: needed by `fetch_pdf` to extract PDF text. Put `pdftotext` on PATH, or set `CLAUDE_NET_PDFTOTEXT` to the executable path. If local `pdftotext` is broken, run `pdf_status` first; you can also pass `extractor: "none"` to `fetch_pdf` to verify PDF downloads without text extraction.
 - Search API keys: pass them only through environment variables, such as `BRAVE_SEARCH_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `SERPER_API_KEY`, and `TAVILY_API_KEY`.
 - Local proxy/VPN: set `CLAUDE_NET_PROXY`, for example `http://127.0.0.1:7890` or `socks5h://127.0.0.1:7890`. Set it to `direct` to force direct access.
 
@@ -56,7 +56,7 @@ Not required:
 
 Optional:
 
-- Poppler `pdftotext`: needed by `fetch_pdf`.
+- Poppler `pdftotext`: needed by `fetch_pdf`. If the local command fails, use `pdf_status` to check the path and version, or pass `extractor: "none"` to skip text extraction.
 - Search API keys: same as the Node/curl build, passed through environment variables.
 - HTTP(S) proxy: supported by Python's standard library. SOCKS proxies are not part of the standard library, so use the Node/curl build for SOCKS.
 
@@ -112,12 +112,13 @@ If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
 ## Tools
 
 - `proxy_status`: shows the current route, provider order, and important environment-variable status.
+- `pdf_status`: checks the local `pdftotext` path, version, and executable status.
 - `search_web`: searches the web. By default it does not apply heuristic reranking; it only deduplicates, applies basic relevance filtering, and honors domain filters. Pass `rerank: true` if you want heuristic reranking.
 - `fetch_url`: fetches a URL with `GET/POST/PUT/PATCH/DELETE`, custom headers, cookies, cookie jars, request bodies, and `auto/text/markdown/raw` extraction modes.
 - `extract_links`: fetches a page and extracts normalized links, optionally limited to the same domain.
 - `fetch_json`: fetches a JSON endpoint and pretty-prints parsed JSON.
 - `fetch_rss`: fetches RSS/Atom feeds and returns feed entries.
-- `fetch_pdf`: downloads a PDF and extracts text when `pdftotext` is installed.
+- `fetch_pdf`: downloads a PDF and extracts text when `pdftotext` is installed; supports `extractor: auto|pdftotext|none`.
 
 ## Examples
 
@@ -125,6 +126,7 @@ In Claude Code, you can ask:
 
 ```text
 Use net-tools proxy_status.
+Use net-tools pdf_status.
 Use net-tools search_web to search "Claude Code MCP" count 5.
 Use net-tools fetch_url to read https://example.com as markdown.
 Use net-tools extract_links to list same-domain links from https://example.com.

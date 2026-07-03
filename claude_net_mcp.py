@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 SERVER_NAME = "claude-code-net-tools"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.5.1"
 DEFAULT_TIMEOUT = float(os.environ.get("CLAUDE_NET_TIMEOUT", "20"))
 SEARCH_TIMEOUT = float(os.environ.get("CLAUDE_NET_SEARCH_TIMEOUT", "15"))
 MAX_FETCH_BYTES = int(os.environ.get("CLAUDE_NET_MAX_FETCH_BYTES", "900000"))
@@ -923,10 +923,37 @@ def _looks_pdf(content_type: str, data: bytes) -> bool:
     return "pdf" in (content_type or "").lower() or data.startswith(b"%PDF")
 
 
+def _pdf_text_tool() -> str:
+    return os.environ.get("CLAUDE_NET_PDFTOTEXT", "pdftotext")
+
+
+def _trim_diagnostic(text: str, limit: int = 1600) -> str:
+    value = _normalize_space(text or "")[:limit]
+    return value or "(no output)"
+
+
+def pdf_status(arguments: dict[str, Any]) -> str:
+    tool = _pdf_text_tool()
+    lines = ["PDF extraction status:", f"Command: {tool}"]
+    lines.append("Source: CLAUDE_NET_PDFTOTEXT" if os.environ.get("CLAUDE_NET_PDFTOTEXT") else "Source: PATH lookup for pdftotext")
+    try:
+        proc = subprocess.run([tool, "-v"], check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
+        lines.append("Status: available")
+        lines.append("Version output: " + _trim_diagnostic((proc.stdout or "") + "\n" + (proc.stderr or "")))
+    except Exception as exc:  # noqa: BLE001
+        lines.append("Status: unavailable or failed")
+        lines.append(f"Error: {exc}")
+    lines.append("Tip: install Poppler pdftotext, put it on PATH, or set CLAUDE_NET_PDFTOTEXT to the exact executable path. Use fetch_pdf with extractor=none to verify PDF downloads without text extraction.")
+    return "\n".join(lines)
+
+
 def fetch_pdf(arguments: dict[str, Any]) -> str:
     url = _ensure_url(arguments.get("url"))
     max_chars = max(500, min(int(arguments.get("max_chars", 30000)), 100000))
     timeout = max(1.0, min(float(arguments.get("timeout", 30)), 120.0))
+    extractor = str(arguments.get("extractor", "auto")).lower()
+    if extractor not in {"auto", "pdftotext", "none"}:
+        raise ValueError("extractor must be auto, pdftotext, or none")
     opts = _request_options(arguments, {"headers": {"Accept": "application/pdf,*/*;q=0.5"}, "timeout": timeout, "max_timeout": 120})
     with tempfile.TemporaryDirectory(prefix="ccnet-pdf-") as tmp:
         pdf_path = os.path.join(tmp, "source.pdf")
@@ -939,17 +966,20 @@ def fetch_pdf(arguments: dict[str, Any]) -> str:
             lines.extend(["", f"PDF fetch failed: HTTP {status}. The response was not processed as PDF."])
             return "\n".join(lines)
         if not _looks_pdf(content_type, body):
-            lines.extend(["", "Downloaded content does not look like a PDF; not running pdftotext."])
+            lines.extend(["", "Downloaded content does not look like a PDF; not running PDF text extraction."])
+            return "\n".join(lines)
+        if extractor == "none":
+            lines.extend(["Format: PDF", "", "PDF downloaded and validated. Text extraction was skipped because extractor=none."])
             return "\n".join(lines)
         with open(pdf_path, "wb") as handle:
             handle.write(body)
-        tool = os.environ.get("CLAUDE_NET_PDFTOTEXT", "pdftotext")
+        tool = _pdf_text_tool()
         try:
             proc = subprocess.run([tool, "-layout", pdf_path, "-"], check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout + 5)
             extracted = proc.stdout or "(No extractable text.)"
         except Exception as exc:  # noqa: BLE001
-            extracted = f"PDF downloaded, but text extraction failed. Install Poppler pdftotext or set CLAUDE_NET_PDFTOTEXT. Error: {exc}"
-        lines.extend(["Format: PDF text", "", extracted[:max_chars]])
+            extracted = f"PDF downloaded, but text extraction failed. Run pdf_status for local extractor diagnostics, install Poppler pdftotext, or set CLAUDE_NET_PDFTOTEXT. Error: {exc}"
+        lines.extend([f"Extractor: {tool}", "Format: PDF text", "", extracted[:max_chars]])
         return "\n".join(lines)
 
 def proxy_status(arguments: dict[str, Any]) -> str:
@@ -970,17 +1000,20 @@ def proxy_status(arguments: dict[str, Any]) -> str:
 
 TOOLS = [
     {"name": "proxy_status", "description": "Show which local VPN/proxy routes this server will try before direct connection.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "pdf_status", "description": "Check the local PDF text extraction command used by fetch_pdf.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "search_web", "description": "Search the public web with API providers and free HTML/RSS fallbacks.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "rerank": {"type": "boolean", "default": False}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
     {"name": "fetch_url", "description": "Fetch a URL and return readable text, JSON, RSS, or raw content.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 12000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "text", "markdown", "raw"], "default": "auto"}}, "required": ["url"]}},
     {"name": "extract_links", "description": "Fetch a page and extract normalized links from its HTML.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain": {"type": "boolean", "default": False}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}}, "required": ["url"]}},
     {"name": "fetch_json", "description": "Fetch a JSON endpoint and pretty-print parsed JSON.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 30000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}}, "required": ["url"]}},
     {"name": "fetch_rss", "description": "Fetch an RSS or Atom feed and return feed entries.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}}, "required": ["url"]}},
-    {"name": "fetch_pdf", "description": "Download a PDF and extract text with pdftotext when available.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 30000}, "timeout": {"type": "number", "minimum": 1, "maximum": 120, "default": 30}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}}, "required": ["url"]}},
+    {"name": "fetch_pdf", "description": "Download a PDF and extract text with pdftotext when available.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 30000}, "timeout": {"type": "number", "minimum": 1, "maximum": 120, "default": 30}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "extractor": {"type": "string", "enum": ["auto", "pdftotext", "none"], "default": "auto", "description": "PDF extraction mode. Use none to only verify/download the PDF."}}, "required": ["url"]}},
 ]
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> str:
     if name == "proxy_status":
         return proxy_status(arguments)
+    if name == "pdf_status":
+        return pdf_status(arguments)
     if name == "search_web":
         return search_web(arguments)
     if name == "fetch_url":

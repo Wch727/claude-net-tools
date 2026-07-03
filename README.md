@@ -40,7 +40,7 @@ cd claude-code-net-tools
 
 可选安装/配置：
 
-- Poppler `pdftotext`：用于 `fetch_pdf` 提取 PDF 文本。安装后把 `pdftotext` 放进 PATH，或设置 `CLAUDE_NET_PDFTOTEXT` 指向可执行文件。
+- Poppler `pdftotext`：用于 `fetch_pdf` 提取 PDF 文本。安装后把 `pdftotext` 放进 PATH，或设置 `CLAUDE_NET_PDFTOTEXT` 指向可执行文件。若本机 `pdftotext` 有问题，先用 `pdf_status` 诊断；也可以在 `fetch_pdf` 里传 `extractor: "none"` 只验证 PDF 下载。
 - 搜索 API key：只通过环境变量传入，例如 `BRAVE_SEARCH_API_KEY`、`KIMI_API_KEY`、`MINIMAX_API_KEY`、`SERPER_API_KEY`、`TAVILY_API_KEY`。
 - 本地代理/VPN：设置 `CLAUDE_NET_PROXY`，例如 `http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。设置为 `direct` 可强制直连。
 
@@ -56,7 +56,7 @@ cd claude-code-net-tools
 
 可选安装/配置：
 
-- Poppler `pdftotext`：用于 `fetch_pdf`。
+- Poppler `pdftotext`：用于 `fetch_pdf`。如果本机命令异常，用 `pdf_status` 查路径和版本，或在 `fetch_pdf` 里传 `extractor: "none"` 跳过文本提取。
 - 搜索 API key：同 Node/curl 版，通过环境变量传入。
 - HTTP(S) 代理：Python 标准库可走 HTTP(S) 代理。SOCKS 代理不是标准库能力，建议用 Node/curl 版。
 
@@ -112,12 +112,13 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 ## 工具
 
 - `proxy_status`：显示当前网络出口、provider 顺序和关键环境变量状态。
+- `pdf_status`：检查本机 `pdftotext` 路径、版本和可执行状态。
 - `search_web`：搜索网页。默认不做启发式重排，只做去重、基础相关性过滤和域名过滤；需要重排时传 `rerank: true`。
 - `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/text/markdown/raw` 提取模式。
 - `extract_links`：抓取页面并提取规范化链接，可限制同域名。
 - `fetch_json`：抓取 JSON endpoint 并格式化输出。
 - `fetch_rss`：抓取 RSS/Atom feed 并输出条目。
-- `fetch_pdf`：下载 PDF，并在安装 `pdftotext` 时提取文本。
+- `fetch_pdf`：下载 PDF，并在安装 `pdftotext` 时提取文本；支持 `extractor: auto|pdftotext|none`。
 
 ## 使用示例
 
@@ -125,6 +126,7 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 
 ```text
 Use net-tools proxy_status.
+Use net-tools pdf_status.
 Use net-tools search_web to search "Claude Code MCP" count 5.
 Use net-tools fetch_url to read https://example.com as markdown.
 Use net-tools extract_links to list same-domain links from https://example.com.
