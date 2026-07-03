@@ -11,6 +11,9 @@ Claude Code Net Tools 是一个本地 MCP server，为 Claude Code 和其他 MCP
 - 走本机网络环境，可显式指定 HTTP(S)/SOCKS 代理或直连。
 - 免费搜索源优先可用，DuckDuckGo/Bing/Sogou/360 等失败时继续尝试其他 provider。
 - 支持 Brave、Kimi/Moonshot、MiniMax、Serper、Tavily 等可选 API provider。
+- 基础搜索默认保留 provider 顺序，不偷偷重排、不替 LLM 判断问题含义。
+- 需要辅助过滤、重排、跳转解析时，显式调用增强搜索工具。
+- 推荐先让 LLM 把自然语言问题改写成高质量搜索 query，再交给工具执行。
 - 提供网页、链接、JSON、RSS/Atom、PDF 文本提取工具。
 - API key 只从环境变量读取，不写入代码或仓库。
 
@@ -111,13 +114,36 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 | `TAVILY_API_KEY` | Tavily API。 |
 | `CLAUDE_NET_DEBUG` | 输出更详细的错误信息。 |
 
+## 推荐 Agent 提示词
+
+这个 MCP 的搜索工具只负责执行搜索和抓取材料，不负责理解用户问题。建议把下面这段放进 Claude Code、OpenClaw 或其它 agent 的 system/developer prompt：
+
+```text
+当用户提出需要联网的问题时，不要把原问题机械传给搜索工具。先用你的已有知识判断用户真正想查的实体、领域、时间范围和可能的权威来源，然后生成 1-3 个高质量搜索 query。
+
+优先规则：
+- 对简称、术语、论文、软件包，先补全全称、英文名、作者/机构、论文编号、官网或权威来源关键词。
+- 对中文问题，可以同时生成中文 query 和更容易命中权威资料的英文 query。
+- 先调用 net-tools search_web 执行基础搜索，保留原始 provider 顺序；不要依赖工具替你判断结果好坏。
+- 如果结果太泛或太吵，再用更具体的 query 重搜，或显式调用 search_web_focused。
+- 论文用 scholar_search，软件包用 package_search，网页正文用 fetch_url，PDF 用 fetch_pdf。
+- 工具返回的是材料，不是最终答案；最终答案必须由你综合结果、链接和上下文判断。
+
+例子：
+用户问“bert是啥”时，可以先搜索：
+1. BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805
+2. BERT language model Google AI Wikipedia Hugging Face
+然后再读取 arXiv/Wikipedia/Hugging Face 等结果。
+```
+
 ## 工具
 
 - `proxy_status`：显示当前网络出口、provider 顺序和关键环境变量状态。
 - `pdf_status`：检查本机 `pdftotext` 路径、版本和可执行状态。
 - `search_status`：查看搜索 provider 的 key 配置、禁用状态、最近成功/失败和可选 live 探测。
-- `search_web`：搜索网页。默认不做启发式重排，只做去重、基础相关性过滤和域名过滤；provider 缺 key、被禁用或连续失败时会自动降级到其它 provider；需要重排时传 `rerank: true`。
-- `scholar_search`：专项搜索论文，当前支持 Semantic Scholar、Crossref、arXiv。
+- `search_web`：基础网页搜索。默认只做 provider 失败降级、去重和域名过滤；不扩写 query、不做严格相关性过滤、不做启发式重排、不主动探测跳转最终 URL。让 LLM 先写好 query，再用它拿材料。
+- `search_web_focused`：显式增强网页搜索。支持 cleaned core query 扩展、严格相关性过滤、可选重排和可选跳转解析；适合基础搜索太吵时再用。
+- `scholar_search`：专项搜索论文，当前支持 Semantic Scholar、Crossref、arXiv。论文简称最好由 LLM 先扩写成带全称/作者/编号的 query；工具内部也会为短简称多抓一些 arXiv 早期候选。
 - `package_search`：专项搜索开发包和仓库，当前支持 npm、PyPI、GitHub repositories。
 - `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/readable/text/markdown/raw` 提取模式；`auto` 默认使用正文抽取。
 - `extract_links`：抓取页面并提取规范化链接，可限制同域名。
@@ -140,6 +166,7 @@ Use net-tools extract_links to list same-domain links from https://example.com.
 Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
 Use net-tools fetch_rss to read https://github.blog/feed/ count 5.
 Use net-tools scholar_search to search "Attention Is All You Need" count 5.
+Use net-tools scholar_search to search "BERT" count 3.
 Use net-tools package_search to search "playwright" ecosystem npm count 5.
 Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5, then choose the official arXiv result and use net-tools fetch_pdf to read the PDF.
 ```
@@ -148,10 +175,22 @@ Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5
 
 ```json
 {
-  "query": "Claude Code MCP",
+  "query": "BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805",
+  "count": 5,
+  "providers": ["duckduckgo", "bing_rss"]
+}
+```
+
+如果基础搜索太吵，再显式使用增强搜索：
+
+```json
+{
+  "query": "BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805",
   "count": 5,
   "providers": ["duckduckgo", "bing_rss"],
-  "rerank": false
+  "strict_relevance": true,
+  "rerank": false,
+  "resolve_redirects": false
 }
 ```
 

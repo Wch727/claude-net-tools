@@ -1,6 +1,6 @@
 {
   "name": "claude-code-net-tools",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Local VPN/proxy-aware MCP web search and URL fetch tools for Claude Code.",
   "type": "module",
   "bin": {

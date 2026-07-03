@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 SERVER_NAME = "claude-code-net-tools"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.0"
 DEFAULT_TIMEOUT = float(os.environ.get("CLAUDE_NET_TIMEOUT", "20"))
 SEARCH_TIMEOUT = float(os.environ.get("CLAUDE_NET_SEARCH_TIMEOUT", "15"))
 MAX_FETCH_BYTES = int(os.environ.get("CLAUDE_NET_MAX_FETCH_BYTES", "900000"))
@@ -144,6 +144,11 @@ def _clean_url(url: str) -> str:
     if host.endswith("sogou.com") and "/link" in parsed.path:
         query = urllib.parse.parse_qs(parsed.query)
         for key in ("url", "u"):
+            if query.get(key) and query[key][0].startswith(("http://", "https://")):
+                return query[key][0]
+    if host.endswith("so.com") and parsed.path.startswith("/link"):
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("url", "u", "target"):
             if query.get(key) and query[key][0].startswith(("http://", "https://")):
                 return query[key][0]
     return url
@@ -312,6 +317,50 @@ def _request_url(url: str, *, timeout: float = DEFAULT_TIMEOUT, max_bytes: int =
     raise urllib.error.URLError("; ".join(errors))
 
 
+def _is_search_redirect_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        return True
+    if host.endswith("sogou.com") and "/link" in parsed.path:
+        return True
+    if host.endswith("so.com") and parsed.path.startswith("/link"):
+        return True
+    if host.endswith("bing.com") and "/ck/" in parsed.path:
+        return True
+    return False
+
+
+def _resolve_final_url(url: str) -> str:
+    try:
+        final_url, _, _, _, _ = _request_url(url, timeout=8, max_bytes=1, method="HEAD")
+    except Exception:
+        final_url, _, _, _, _ = _request_url(url, timeout=8, max_bytes=1)
+    return _clean_url(final_url)
+
+
+def _resolve_search_redirect_rows(rows: list[dict[str, str]], notes: list[str]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    resolved = 0
+    failed = 0
+    for row in rows:
+        next_row = dict(row)
+        if _is_search_redirect_url(next_row.get("url", "")):
+            try:
+                final_url = _resolve_final_url(next_row["url"])
+                if final_url.startswith(("http://", "https://")) and final_url != next_row["url"]:
+                    next_row["url"] = final_url
+                    resolved += 1
+            except Exception:
+                failed += 1
+        out.append(next_row)
+    if resolved:
+        notes.append(f"resolved {resolved} search redirect URL(s)")
+    if failed:
+        notes.append(f"failed to resolve {failed} search redirect URL(s)")
+    return _dedupe(out)
+
+
 def _decode_body(body: bytes, content_type: str) -> str:
     match = re.search(r"charset=([^;\s]+)", content_type, flags=re.I)
     candidates = [match.group(1).strip('"')] if match else []
@@ -398,9 +447,9 @@ def _matches_core(row: dict[str, str], core: str) -> bool:
     return core.lower() in haystack
 
 
-def _filter_relevant_results(rows: list[dict[str, str]], query: str) -> list[dict[str, str]]:
+def _filter_relevant_results(rows: list[dict[str, str]], query: str, strict: bool = False) -> list[dict[str, str]]:
     core = _core_query(query)
-    if not _is_cjk(query) or not core or len(core) < 2:
+    if (not strict and not _is_cjk(query)) or not core or len(core) < 2:
         return rows
     matched = [row for row in rows if _matches_core(row, core)]
     return matched
@@ -448,6 +497,54 @@ def _rank_rows(rows: list[dict[str, str]], query: str) -> list[dict[str, str]]:
             score += 5
         if re.search(r"baike|wiki|profile|faculty|academic|teacher|homepage", url + " " + title, flags=re.I):
             score += 4
+        ranked.append((score, index, row))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [row for _, _, row in ranked]
+
+
+def _compact_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", _normalize_space(text).lower())
+
+
+def _is_short_scholar_query(query: str) -> bool:
+    cleaned = _normalize_space(query).replace('"', "").replace("'", "")
+    return bool(re.match(r"^[a-z0-9][a-z0-9._-]{1,15}$", cleaned, flags=re.I)) and " " not in cleaned
+
+
+def _rank_scholar_rows(rows: list[dict[str, str]], query: str) -> list[dict[str, str]]:
+    phrase = _normalize_space(query).lower()
+    compact_phrase = _compact_key(phrase)
+    terms = [re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", term) for term in phrase.split()]
+    terms = [term for term in terms if len(term) > 1]
+    token_start = re.compile("^" + re.escape(phrase) + "([\\s:\\uFF1A\\-]|$)", flags=re.I) if phrase and " " not in phrase else None
+    ranked = []
+    for index, row in enumerate(rows):
+        title = _normalize_space(row.get("title", ""))
+        lower_title = title.lower()
+        compact_title = _compact_key(title)
+        snippet = row.get("snippet", "").lower()
+        url = row.get("url", "").lower()
+        score = 0
+        if phrase and lower_title == phrase:
+            score += 140
+        if token_start and token_start.search(title):
+            score += 120
+        if phrase and (lower_title.startswith(phrase + ":") or lower_title.startswith(phrase + " -") or lower_title.startswith(phrase + " ")):
+            score += 100
+        if phrase and phrase in lower_title:
+            score += 55
+        if compact_phrase and compact_phrase in compact_title:
+            score += 35
+        if terms and all(term in lower_title for term in terms):
+            score += 25
+        if phrase and phrase in snippet:
+            score += 10
+        if re.search(r"arxiv\.org/(abs|pdf)/", url):
+            score += 8
+        if row.get("provider") == "arxiv":
+            score += 4
+        if terms and not any(term in lower_title for term in terms):
+            score -= 40
         ranked.append((score, index, row))
     ranked.sort(key=lambda item: (-item[0], item[1]))
     return [row for _, _, row in ranked]
@@ -754,20 +851,39 @@ def _parse_arxiv_entries(text: str, count: int) -> list[dict[str, str]]:
 
 def _search_arxiv(query: str, count: int) -> list[dict[str, str]]:
     cleaned = _normalize_space(query).replace('"', "")
-    attempts: list[str] = []
+    attempts: list[tuple[str, str, str]] = []
+
+    def add_attempt(search_query: str, sort_by: str = "", sort_order: str = "") -> None:
+        attempt = (search_query, sort_by, sort_order)
+        if attempt not in attempts:
+            attempts.append(attempt)
+
+    if cleaned:
+        add_attempt(f'ti:"{cleaned}"')
+    if _is_short_scholar_query(cleaned):
+        add_attempt(f'ti:"{cleaned}"', "submittedDate", "ascending")
     if " " in cleaned:
-        attempts.append(f'ti:"{cleaned}"')
-    attempts.append("all:" + query)
+        add_attempt(f'all:"{cleaned}"')
+    add_attempt("all:" + query)
     notes: list[str] = []
-    for search_query in attempts:
+    rows: list[dict[str, str]] = []
+    for search_query, sort_by, sort_order in attempts:
         try:
-            _, content_type, body, _, _ = _request_url("https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"search_query": search_query, "start": 0, "max_results": count}), timeout=20, max_bytes=1200000, headers={"Accept": "application/atom+xml,application/xml"})
-            rows = _parse_arxiv_entries(_decode_body(body, content_type), count)
-            if rows:
-                return rows
-            notes.append(f"{search_query}: 0 result(s)")
+            params = {"search_query": search_query, "start": 0, "max_results": count}
+            if sort_by:
+                params["sortBy"] = sort_by
+            if sort_order:
+                params["sortOrder"] = sort_order
+            _, content_type, body, _, _ = _request_url("https://export.arxiv.org/api/query?" + urllib.parse.urlencode(params), timeout=20, max_bytes=1800000, headers={"Accept": "application/atom+xml,application/xml"})
+            found = _parse_arxiv_entries(_decode_body(body, content_type), count)
+            if found:
+                rows = _dedupe(rows + found)
+            else:
+                notes.append(f"{search_query}: 0 result(s)")
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{search_query}: {exc}")
+    if rows:
+        return _rank_scholar_rows(rows, query)
     if notes:
         raise ValueError("; ".join(notes))
     return []
@@ -790,16 +906,17 @@ def scholar_search(arguments: dict[str, Any]) -> str:
         raise ValueError("query is required")
     count = max(1, min(int(arguments.get("count", 5)), 10))
     providers = _dedupe_providers(arguments.get("providers") if isinstance(arguments.get("providers"), list) and arguments.get("providers") else ["arxiv", "semantic_scholar", "crossref"])
+    candidate_count = max(count, 30 if _is_short_scholar_query(query) else 10)
     notes: list[str] = []
     rows: list[dict[str, str]] = []
     for provider in providers:
         try:
-            found = _scholar_provider(provider, query, count)
+            found = _scholar_provider(provider, query, candidate_count)
             notes.append(f"{provider}: {len(found)} result(s)")
             rows = _dedupe(rows + found)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{provider}: {exc}")
-    return _format_result_rows("Scholar results for: " + query, _rank_rows(rows, query)[:count], notes)
+    return _format_result_rows("Scholar results for: " + query, _rank_scholar_rows(rows, query)[:count], notes)
 
 
 def _search_npm_packages(query: str, count: int) -> list[dict[str, str]]:
@@ -899,41 +1016,71 @@ def search_web(arguments: dict[str, Any]) -> str:
     if not query:
         raise ValueError("query is required")
     count = max(1, min(int(arguments.get("count", 5)), 10))
+    notes: list[str] = ["mode: basic (provider order preserved; no query expansion, filtering, reranking, or redirect probing)"]
+    providers = _active_provider_order(query, arguments.get("providers"), notes)
+    rows: list[dict[str, str]] = []
+    for provider in providers:
+        if len(rows) >= count:
+            break
+        try:
+            raw = _run_provider_tracked(provider, query, max(1, count - len(rows)))
+            notes.append(f"{provider}: {len(raw)} result(s) for {query!r}")
+            rows = _dedupe(rows + raw)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{provider}: {exc}")
+    rows = _filter_domains(_dedupe(rows), [str(x) for x in arguments.get("allowed_domains", [])], [str(x) for x in arguments.get("blocked_domains", [])])[:count]
+    if not rows:
+        return "\n".join([f"No search results for {query!r}.", "", "Provider notes:", *[f"- {note}" for note in notes]])
+    return _format_result_rows(f"Search results for: {query}", rows, notes)
+
+
+def search_web_focused(arguments: dict[str, Any]) -> str:
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+    count = max(1, min(int(arguments.get("count", 5)), 10))
+    expand_query = True if "expand_query" not in arguments else _as_bool(arguments.get("expand_query"))
+    strict_relevance = True if "strict_relevance" not in arguments else _as_bool(arguments.get("strict_relevance"))
     rerank = _as_bool(arguments.get("rerank"))
+    resolve_redirects = _as_bool(arguments.get("resolve_redirects"))
     candidate_count = max(count, 10) if rerank else count
     queries = [query]
     core = _core_query(query)
-    if _is_cjk(query) and core and core != query:
+    if expand_query and _is_cjk(query) and core and core != query:
         queries.extend([f'"{core}"', core])
-    notes: list[str] = []
+    notes: list[str] = ["mode: focused (explicit assisted search)"]
+    if expand_query and len(queries) > 1:
+        notes.append("expand_query: " + ", ".join(queries[1:]))
+    if strict_relevance:
+        notes.append("strict_relevance: enabled")
     if rerank:
         notes.append("rerank: enabled (heuristic result ordering)")
+    if resolve_redirects:
+        notes.append("resolve_redirects: enabled")
     providers = _active_provider_order(query, arguments.get("providers"), notes)
-    provider_count = max(1, (count + 1) // 2) if (not rerank and _is_cjk(query) and len(providers) > 1) else candidate_count
     rows: list[dict[str, str]] = []
     for q in queries:
         for provider in providers:
-            if not _is_cjk(query) and len(rows) >= count:
-                break
             try:
-                raw = _run_provider_tracked(provider, q, provider_count)
-                relevant = _filter_relevant_results(raw, query)
-                if raw and not relevant:
+                raw = _run_provider_tracked(provider, q, candidate_count)
+                usable = _filter_relevant_results(raw, query, True) if strict_relevance else raw
+                if strict_relevance and raw and not usable:
                     notes.append(f"{provider}: ignored {len(raw)} low-relevance result(s)")
-                if relevant:
-                    notes.append(f"{provider}: {len(relevant)} result(s) for {q!r}")
-                rows = _dedupe(rows + relevant)
+                if usable:
+                    notes.append(f"{provider}: {len(usable)} result(s) for {q!r}")
+                rows = _dedupe(rows + usable)
             except Exception as exc:  # noqa: BLE001
                 notes.append(f"{provider}: {exc}")
-        if not _is_cjk(query) and len(rows) >= count:
-            break
-    rows = _filter_domains(_dedupe(rows), [str(x) for x in arguments.get("allowed_domains", [])], [str(x) for x in arguments.get("blocked_domains", [])])
+    rows = _dedupe(rows)
+    if resolve_redirects:
+        rows = _resolve_search_redirect_rows(rows, notes)
+    rows = _filter_domains(rows, [str(x) for x in arguments.get("allowed_domains", [])], [str(x) for x in arguments.get("blocked_domains", [])])
     if rerank:
         rows = _rank_rows(rows, query)
     rows = rows[:count]
     if not rows:
-        return "\n".join([f"No search results for {query!r}.", "", "Provider notes:", *[f"- {note}" for note in notes]])
-    return _format_result_rows(f"Search results for: {query}", rows, notes)
+        return "\n".join([f"No focused search results for {query!r}.", "", "Provider notes:", *[f"- {note}" for note in notes]])
+    return _format_result_rows(f"Focused search results for: {query}", rows, notes)
 
 class TextExtractor(HTMLParser):
     SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas"}
@@ -1379,7 +1526,8 @@ TOOLS = [
     {"name": "proxy_status", "description": "Show which local VPN/proxy routes this server will try before direct connection.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "pdf_status", "description": "Check the local PDF text extraction command used by fetch_pdf.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "search_status", "description": "Show search provider availability, recent failures, and optional live health probes.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "default": "Claude Code MCP"}, "providers": {"type": "array", "items": {"type": "string"}}, "live": {"type": "boolean", "default": False, "description": "When true, run a one-result live probe for available providers."}}}},
-    {"name": "search_web", "description": "Search the public web with API providers and free HTML/RSS fallbacks.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "rerank": {"type": "boolean", "default": False}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
+    {"name": "search_web", "description": "Basic public web search. Preserves provider order and leaves ranking/filtering to the LLM.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
+    {"name": "search_web_focused", "description": "Assisted web search with query expansion, optional relevance filtering, reranking, and redirect resolution.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "expand_query": {"type": "boolean", "default": True, "description": "For CJK questions, also try a cleaned core query."}, "strict_relevance": {"type": "boolean", "default": True, "description": "Drop results that do not contain the core query."}, "rerank": {"type": "boolean", "default": False, "description": "When true, apply heuristic result re-ranking."}, "resolve_redirects": {"type": "boolean", "default": False, "description": "Resolve known search-engine redirect URLs to their final target URLs."}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
     {"name": "scholar_search", "description": "Search academic papers through specialized providers such as Semantic Scholar, Crossref, and arXiv.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}, "description": "semantic_scholar, crossref, arxiv"}}, "required": ["query"]}},
     {"name": "package_search", "description": "Search developer package and repository indexes such as npm, PyPI, and GitHub repositories.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "ecosystem": {"type": "string", "enum": ["all", "npm", "pypi", "github"], "default": "all"}, "providers": {"type": "array", "items": {"type": "string"}, "description": "npm, pypi, github"}}, "required": ["query"]}},
     {"name": "fetch_url", "description": "Fetch a URL and return readable text, JSON, RSS, or raw content.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 12000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "readable", "text", "markdown", "raw"], "default": "auto"}}, "required": ["url"]}},
@@ -1398,6 +1546,8 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> str:
         return search_status(arguments)
     if name == "search_web":
         return search_web(arguments)
+    if name == "search_web_focused":
+        return search_web_focused(arguments)
     if name == "scholar_search":
         return scholar_search(arguments)
     if name == "package_search":

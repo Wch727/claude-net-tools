@@ -11,6 +11,9 @@ When Claude Code is connected to external models/APIs, local proxies/VPNs, corpo
 - Uses your machine's network route, with explicit direct/proxy control.
 - Tries free HTML/RSS search fallbacks such as DuckDuckGo, Bing, Sogou, and 360.
 - Supports optional API providers such as Brave, Kimi/Moonshot, MiniMax, Serper, and Tavily.
+- Basic search preserves provider order by default and does not pretend to understand the user's intent.
+- Assisted filtering, reranking, and redirect resolution are explicit opt-in behavior.
+- Recommended workflow: let the LLM rewrite the natural-language question into strong search queries, then let the tool execute them.
 - Provides webpage, link, JSON, RSS/Atom, and PDF text extraction tools.
 - Reads API keys only from environment variables. Do not commit keys to the repository.
 
@@ -111,13 +114,36 @@ If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
 | `TAVILY_API_KEY` | Tavily API. |
 | `CLAUDE_NET_DEBUG` | Print more detailed error messages. |
 
+## Recommended Agent Prompt
+
+This MCP server executes search and fetching. It should not be responsible for understanding the user's question. Put a prompt like this in Claude Code, OpenClaw, or another agent's system/developer prompt:
+
+```text
+When the user asks a question that needs the web, do not pass the raw user wording directly to the search tool. First use your own knowledge to identify the entity, domain, time scope, and likely authoritative sources, then create 1-3 high-quality search queries.
+
+Rules:
+- For acronyms, terms, papers, and packages, expand names and add authors, organizations, paper IDs, official sites, or authoritative-source keywords.
+- For Chinese questions, consider both Chinese queries and English queries that are more likely to hit authoritative sources.
+- First call net-tools search_web for basic search; it preserves provider order and leaves judgment to you.
+- If results are too broad or noisy, search again with a better query or explicitly call search_web_focused.
+- Use scholar_search for papers, package_search for packages, fetch_url for pages, and fetch_pdf for PDFs.
+- Tool output is source material, not the final answer. You must synthesize the answer from links, snippets, and fetched content.
+
+Example:
+If the user asks "bert是啥", search for:
+1. BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805
+2. BERT language model Google AI Wikipedia Hugging Face
+Then read arXiv/Wikipedia/Hugging Face or similar authoritative results.
+```
+
 ## Tools
 
 - `proxy_status`: shows the current route, provider order, and important environment-variable status.
 - `pdf_status`: checks the local `pdftotext` path, version, and executable status.
 - `search_status`: shows provider key configuration, disabled status, recent success/failure counts, and optional live probes.
-- `search_web`: searches the web. By default it does not apply heuristic reranking; it only deduplicates, applies basic relevance filtering, and honors domain filters. Providers with missing keys, disabled status, or repeated failures are automatically degraded to other providers. Pass `rerank: true` if you want heuristic reranking.
-- `scholar_search`: specialized paper search through Semantic Scholar, Crossref, and arXiv.
+- `search_web`: basic web search. By default it only handles provider fallback, deduplication, and domain filters; it does not expand queries, apply strict relevance filtering, rerank results, or actively probe redirect final URLs. Let the LLM write the query first, then use this tool for source material.
+- `search_web_focused`: explicit assisted web search with cleaned core-query expansion, strict relevance filtering, optional reranking, and optional redirect resolution. Use it only when basic search is too noisy.
+- `scholar_search`: specialized paper search through Semantic Scholar, Crossref, and arXiv. For acronyms, the LLM should expand the query with the full name, authors, or paper ID first; the tool also fetches extra early arXiv candidates for short acronym queries.
 - `package_search`: specialized developer package and repository search through npm, PyPI, and GitHub repositories.
 - `fetch_url`: fetches a URL with `GET/POST/PUT/PATCH/DELETE`, custom headers, cookies, cookie jars, request bodies, and `auto/readable/text/markdown/raw` extraction modes; `auto` uses readable main-content extraction for HTML.
 - `extract_links`: fetches a page and extracts normalized links, optionally limited to the same domain.
@@ -140,6 +166,7 @@ Use net-tools extract_links to list same-domain links from https://example.com.
 Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
 Use net-tools fetch_rss to read https://github.blog/feed/ count 5.
 Use net-tools scholar_search to search "Attention Is All You Need" count 5.
+Use net-tools scholar_search to search "BERT" count 3.
 Use net-tools package_search to search "playwright" ecosystem npm count 5.
 Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5, then choose the official arXiv result and use net-tools fetch_pdf to read the PDF.
 ```
@@ -148,10 +175,22 @@ You can also specify providers directly in MCP arguments:
 
 ```json
 {
-  "query": "Claude Code MCP",
+  "query": "BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805",
+  "count": 5,
+  "providers": ["duckduckgo", "bing_rss"]
+}
+```
+
+If basic search is too noisy, explicitly use assisted search:
+
+```json
+{
+  "query": "BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805",
   "count": 5,
   "providers": ["duckduckgo", "bing_rss"],
-  "rerank": false
+  "strict_relevance": true,
+  "rerank": false,
+  "resolve_redirects": false
 }
 ```
 

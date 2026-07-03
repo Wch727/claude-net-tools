@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SERVER_NAME = "claude-code-net-tools";
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 const COMMON_LOCAL_PROXY_PORTS = [7890, 7897, 7899, 10809, 10808, 1080, 8080, 20171, 2080];
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 const CURL = process.env.CLAUDE_NET_CURL || "curl.exe";
@@ -45,14 +45,33 @@ const TOOLS = [
   },
   {
     name: "search_web",
-    description: "Search the public web with API providers and free HTML/RSS fallbacks.",
+    description: "Basic public web search. Preserves provider order and leaves ranking/filtering to the LLM.",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "Search query" },
         count: { type: "number", minimum: 1, maximum: 10, default: 5 },
         providers: { type: "array", items: { type: "string" } },
-        rerank: { type: "boolean", default: false, description: "When true, apply heuristic result re-ranking. Default false preserves provider order." },
+        allowed_domains: { type: "array", items: { type: "string" } },
+        blocked_domains: { type: "array", items: { type: "string" } },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "search_web_focused",
+    description: "Assisted web search with query expansion, optional relevance filtering, reranking, and redirect resolution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        count: { type: "number", minimum: 1, maximum: 10, default: 5 },
+        providers: { type: "array", items: { type: "string" } },
+        expand_query: { type: "boolean", default: true, description: "For CJK questions, also try a cleaned core query." },
+        strict_relevance: { type: "boolean", default: true, description: "Drop results that do not contain the core query." },
+        rerank: { type: "boolean", default: false, description: "When true, apply heuristic result re-ranking." },
+        resolve_redirects: { type: "boolean", default: false, description: "Resolve known search-engine redirect URLs to their final target URLs." },
         allowed_domains: { type: "array", items: { type: "string" } },
         blocked_domains: { type: "array", items: { type: "string" } },
       },
@@ -243,6 +262,12 @@ function cleanUrl(url) {
         if (value && /^https?:\/\//i.test(value)) return value;
       }
     }
+    if (domainOf(url).endsWith("so.com") && parsed.pathname.startsWith("/link")) {
+      for (const key of ["url", "u", "target"]) {
+        const value = parsed.searchParams.get(key);
+        if (value && /^https?:\/\//i.test(value)) return value;
+      }
+    }
   } catch {}
   return url;
 }
@@ -402,6 +427,62 @@ async function curlDownload(url, targetPath, { method = "GET", headers = {}, bod
   }
   throw new Error(errors.join("; "));
 }
+
+async function curlFinalUrl(url, { timeout = 8 } = {}) {
+  const routes = await proxyCandidates();
+  const errors = [];
+  for (const proxy of routes) {
+    const args = ["-L", "--head", "--silent", "--show-error", "--max-time", String(timeout), "-A", USER_AGENT, "--output", os.devNull, "-w", "__CLAUDE_NET_META__%{http_code}\t%{url_effective}"];
+    if (proxy) args.push("--proxy", proxy); else args.push("--noproxy", "*");
+    args.push(url);
+    try {
+      const { stdout } = await execFileAsync(CURL, args, { encoding: "utf8", windowsHide: true, maxBuffer: 65536, timeout: (timeout + 3) * 1000 });
+      const [status = "", finalUrl = ""] = stdout.replace("__CLAUDE_NET_META__", "").trim().split("\t");
+      return { status, finalUrl: finalUrl || url, route: proxy || "direct" };
+    } catch (error) {
+      errors.push(`${proxy || "direct"}: ${error.message}`);
+    }
+  }
+  throw new Error(errors.join("; "));
+}
+
+function isSearchRedirectUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = domainOf(url);
+    if (host.endsWith("duckduckgo.com") && parsed.pathname.startsWith("/l/")) return true;
+    if (host.endsWith("sogou.com") && parsed.pathname.includes("/link")) return true;
+    if (host.endsWith("so.com") && parsed.pathname.startsWith("/link")) return true;
+    if (host.endsWith("bing.com") && parsed.pathname.includes("/ck/")) return true;
+  } catch {}
+  return false;
+}
+
+async function resolveSearchRedirectRows(rows, notes = []) {
+  const out = [];
+  let resolved = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const next = { ...row };
+    if (isSearchRedirectUrl(next.url)) {
+      try {
+        const { finalUrl } = await curlFinalUrl(next.url);
+        const cleaned = cleanUrl(finalUrl);
+        if (/^https?:\/\//i.test(cleaned) && cleaned !== next.url) {
+          next.url = cleaned;
+          resolved += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+    out.push(next);
+  }
+  if (resolved) notes.push("resolved " + resolved + " search redirect URL(s)");
+  if (failed) notes.push("failed to resolve " + failed + " search redirect URL(s)");
+  return dedupe(out);
+}
+
 function result(title, url, snippet = "", provider = "") {
   return { title: normalizeSpace(stripTags(title)), url: cleanUrl(url), snippet: normalizeSpace(stripTags(snippet)), provider };
 }
@@ -445,9 +526,9 @@ function parseGenericHtml(html, count, provider) {
   return rows;
 }
 
-function filterRelevantRows(rows, query) {
+function filterRelevantRows(rows, query, strict = false) {
   const core = coreQuery(query);
-  if (!isCjk(query) || !core || core.length < 2) return rows;
+  if ((!strict && !isCjk(query)) || !core || core.length < 2) return rows;
   return rows.filter((row) => `${row.title} ${row.snippet} ${row.url}`.toLowerCase().includes(core.toLowerCase()));
 }
 
@@ -477,6 +558,45 @@ function rankRows(rows, query) {
     if (/\.edu\.cn|\.edu\//i.test(url)) score += 8;
     if (/[\u6559\u5e08\u4e3b\u9875\u5b66\u9662\u5927\u5b66\u6559\u6388\u7b80\u4ecb\u7b80\u5386]/.test(row.title || "")) score += 5;
     if (/baike|wiki|profile|faculty|academic|teacher|homepage/i.test(url + " " + title)) score += 4;
+    return { row, score, index };
+  }).sort((a, b) => (b.score - a.score) || (a.index - b.index)).map((item) => item.row);
+}
+
+function escapeRegExp(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compactKey(text) {
+  return normalizeSpace(text).toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, "");
+}
+
+function isShortScholarQuery(query) {
+  const cleaned = normalizeSpace(query).replace(/["']/g, "");
+  return /^[a-z0-9][a-z0-9._-]{1,15}$/i.test(cleaned) && !cleaned.includes(" ");
+}
+
+function rankScholarRows(rows, query) {
+  const phrase = normalizeSpace(query).toLowerCase();
+  const compactPhrase = compactKey(phrase);
+  const terms = phrase.split(/\s+/).map((term) => term.replace(/[^a-z0-9\u3400-\u9fff]+/g, "")).filter((term) => term.length > 1);
+  const tokenStart = phrase && !phrase.includes(" ") ? new RegExp("^" + escapeRegExp(phrase) + "([\\s:\\uFF1A\\-]|$)", "i") : null;
+  return rows.map((row, index) => {
+    const title = normalizeSpace(row.title || "");
+    const lowerTitle = title.toLowerCase();
+    const compactTitle = compactKey(title);
+    const snippet = String(row.snippet || "").toLowerCase();
+    const url = String(row.url || "").toLowerCase();
+    let score = 0;
+    if (phrase && lowerTitle === phrase) score += 140;
+    if (tokenStart && tokenStart.test(title)) score += 120;
+    if (phrase && (lowerTitle.startsWith(phrase + ":") || lowerTitle.startsWith(phrase + " -") || lowerTitle.startsWith(phrase + " "))) score += 100;
+    if (phrase && lowerTitle.includes(phrase)) score += 55;
+    if (compactPhrase && compactTitle.includes(compactPhrase)) score += 35;
+    if (terms.length && terms.every((term) => lowerTitle.includes(term))) score += 25;
+    if (phrase && snippet.includes(phrase)) score += 10;
+    if (/arxiv\.org\/(abs|pdf)\//i.test(url)) score += 8;
+    if (row.provider === "arxiv") score += 4;
+    if (terms.length && !terms.some((term) => lowerTitle.includes(term))) score -= 40;
     return { row, score, index };
   }).sort((a, b) => (b.score - a.score) || (a.index - b.index)).map((item) => item.row);
 }
@@ -746,20 +866,31 @@ function parseArxivEntries(xml, count) {
 async function searchArxiv(query, count) {
   const attempts = [];
   const cleaned = normalizeSpace(query).replace(/"/g, "");
-  if (cleaned.includes(" ")) attempts.push('ti:"' + cleaned + '"');
-  attempts.push("all:" + query);
+  const shortQuery = isShortScholarQuery(cleaned);
+  const addAttempt = (searchQuery, sortBy = "", sortOrder = "") => {
+    const key = [searchQuery, sortBy, sortOrder].join("|");
+    if (!attempts.some((item) => item.key === key)) attempts.push({ key, searchQuery, sortBy, sortOrder });
+  };
+  if (cleaned) addAttempt('ti:"' + cleaned + '"');
+  if (shortQuery && cleaned) addAttempt('ti:"' + cleaned + '"', "submittedDate", "ascending");
+  if (cleaned.includes(" ")) addAttempt('all:"' + cleaned + '"');
+  addAttempt("all:" + query);
   const notes = [];
-  for (const searchQuery of attempts) {
+  let rows = [];
+  for (const attempt of attempts) {
     try {
-      const params = new URLSearchParams({ search_query: searchQuery, start: "0", max_results: String(count) });
-      const { text } = await curlRequest("https://export.arxiv.org/api/query?" + params, { headers: { Accept: "application/atom+xml,application/xml" }, timeout: 20, maxBytes: 1200000 });
-      const rows = parseArxivEntries(text, count);
-      if (rows.length) return rows;
-      notes.push(searchQuery + ": 0 result(s)");
+      const params = new URLSearchParams({ search_query: attempt.searchQuery, start: "0", max_results: String(count) });
+      if (attempt.sortBy) params.set("sortBy", attempt.sortBy);
+      if (attempt.sortOrder) params.set("sortOrder", attempt.sortOrder);
+      const { text } = await curlRequest("https://export.arxiv.org/api/query?" + params, { headers: { Accept: "application/atom+xml,application/xml" }, timeout: 20, maxBytes: 1800000 });
+      const found = parseArxivEntries(text, count);
+      if (found.length) rows = dedupe(rows.concat(found));
+      else notes.push(attempt.searchQuery + ": 0 result(s)");
     } catch (error) {
-      notes.push(searchQuery + ": " + error.message);
+      notes.push(attempt.searchQuery + ": " + error.message);
     }
   }
+  if (rows.length) return rankScholarRows(rows, query);
   if (notes.length) throw new Error(notes.join("; "));
   return [];
 }
@@ -777,18 +908,19 @@ async function scholarSearch(args) {
   if (!query) throw new Error("query is required");
   const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
   const providers = dedupeProviders(Array.isArray(args?.providers) && args.providers.length ? args.providers : ["arxiv", "semantic_scholar", "crossref"]);
+  const candidateCount = Math.max(count, isShortScholarQuery(query) ? 30 : 10);
   const notes = [];
   let rows = [];
   for (const provider of providers) {
     try {
-      const providerRows = await scholarProvider(provider, query, count);
+      const providerRows = await scholarProvider(provider, query, candidateCount);
       notes.push(provider + ": " + providerRows.length + " result(s)");
       rows = dedupe(rows.concat(providerRows));
     } catch (error) {
       notes.push(provider + ": " + error.message);
     }
   }
-  return formatResultRows("Scholar results for: " + query, rankRows(rows, query).slice(0, count), notes);
+  return formatResultRows("Scholar results for: " + query, rankScholarRows(rows, query).slice(0, count), notes);
 }
 
 async function searchNpmPackages(query, count) {
@@ -886,36 +1018,63 @@ async function searchWeb(args) {
   const query = String(args?.query || "").trim();
   if (!query) throw new Error("query is required");
   const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
+  const notes = ["mode: basic (provider order preserved; no query expansion, filtering, reranking, or redirect probing)"];
+  const providers = activeProviderOrder(query, args?.providers, notes);
+  let rows = [];
+  for (const provider of providers) {
+    if (rows.length >= count) break;
+    try {
+      const raw = await runProviderTracked(provider, query, Math.max(1, count - rows.length));
+      notes.push(provider + ": " + raw.length + " result(s) for " + JSON.stringify(query));
+      rows = dedupe(rows.concat(raw));
+    } catch (error) {
+      notes.push(provider + ": " + error.message);
+    }
+  }
+  rows = filterDomains(dedupe(rows), args?.allowed_domains || [], args?.blocked_domains || []).slice(0, count);
+  if (!rows.length) return ["No search results for " + JSON.stringify(query) + ".", "", "Provider notes:", ...notes.map((x) => "- " + x)].join("\n");
+  return formatResultRows("Search results for: " + query, rows, notes);
+}
+
+async function searchWebFocused(args) {
+  const query = String(args?.query || "").trim();
+  if (!query) throw new Error("query is required");
+  const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
+  const expandQuery = args?.expand_query === undefined ? true : Boolean(args?.expand_query);
+  const strictRelevance = args?.strict_relevance === undefined ? true : Boolean(args?.strict_relevance);
   const rerank = Boolean(args?.rerank);
+  const resolveRedirects = Boolean(args?.resolve_redirects);
   const candidateCount = rerank ? Math.max(count, 10) : count;
   const queries = [query];
   const core = coreQuery(query);
-  if (isCjk(query) && core && core !== query) queries.push('"' + core + '"', core);
-  const notes = [];
+  if (expandQuery && isCjk(query) && core && core !== query) queries.push('"' + core + '"', core);
+  const notes = ["mode: focused (explicit assisted search)"];
+  if (expandQuery && queries.length > 1) notes.push("expand_query: " + queries.slice(1).join(", "));
+  if (strictRelevance) notes.push("strict_relevance: enabled");
   if (rerank) notes.push("rerank: enabled (heuristic result ordering)");
+  if (resolveRedirects) notes.push("resolve_redirects: enabled");
   const providers = activeProviderOrder(query, args?.providers, notes);
-  const providerCount = (!rerank && isCjk(query) && providers.length > 1) ? Math.max(1, Math.ceil(count / 2)) : candidateCount;
   let rows = [];
   for (const q of queries) {
     for (const provider of providers) {
-      if (!isCjk(query) && rows.length >= count) break;
       try {
-        const raw = await runProviderTracked(provider, q, providerCount);
-        const relevant = filterRelevantRows(raw, query);
-        if (raw.length && !relevant.length) notes.push(provider + ": ignored " + raw.length + " low-relevance result(s)");
-        if (relevant.length) notes.push(provider + ": " + relevant.length + " result(s) for " + JSON.stringify(q));
-        rows = dedupe(rows.concat(relevant));
+        const raw = await runProviderTracked(provider, q, candidateCount);
+        const usable = strictRelevance ? filterRelevantRows(raw, query, true) : raw;
+        if (strictRelevance && raw.length && !usable.length) notes.push(provider + ": ignored " + raw.length + " low-relevance result(s)");
+        if (usable.length) notes.push(provider + ": " + usable.length + " result(s) for " + JSON.stringify(q));
+        rows = dedupe(rows.concat(usable));
       } catch (error) {
         notes.push(provider + ": " + error.message);
       }
     }
-    if (!isCjk(query) && rows.length >= count) break;
   }
-  rows = filterDomains(dedupe(rows), args?.allowed_domains || [], args?.blocked_domains || []);
+  rows = dedupe(rows);
+  if (resolveRedirects) rows = await resolveSearchRedirectRows(rows, notes);
+  rows = filterDomains(rows, args?.allowed_domains || [], args?.blocked_domains || []);
   if (rerank) rows = rankRows(rows, query);
   rows = rows.slice(0, count);
-  if (!rows.length) return ["No search results for " + JSON.stringify(query) + ".", "", "Provider notes:", ...notes.map((x) => "- " + x)].join("\n");
-  return formatResultRows("Search results for: " + query, rows, notes);
+  if (!rows.length) return ["No focused search results for " + JSON.stringify(query) + ".", "", "Provider notes:", ...notes.map((x) => "- " + x)].join("\n");
+  return formatResultRows("Focused search results for: " + query, rows, notes);
 }
 
 function stripTagsToText(value) {
@@ -1276,6 +1435,7 @@ async function callTool(name, args) {
   if (name === "pdf_status") return pdfStatus(args);
   if (name === "search_status") return searchStatus(args);
   if (name === "search_web") return searchWeb(args);
+  if (name === "search_web_focused") return searchWebFocused(args);
   if (name === "scholar_search") return scholarSearch(args);
   if (name === "package_search") return packageSearch(args);
   if (name === "fetch_url") return fetchUrl(args);
