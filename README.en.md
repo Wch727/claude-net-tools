@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-Claude Code Net Tools is a local MCP server that gives Claude Code and other MCP clients configurable web search, URL fetching, and content extraction tools.
+Claude Code Net Tools is a local MCP server that gives Claude Code configurable web search, URL fetching, and content extraction tools.
 
 ## What Problem It Solves
 
@@ -77,7 +77,7 @@ Python build:
 claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_mcp.py
 ```
 
-Other MCP clients can use an equivalent config:
+Equivalent manual MCP config:
 
 ```json
 {
@@ -114,35 +114,98 @@ If you do not need a proxy, remove `env` or set `CLAUDE_NET_PROXY` to `direct`.
 | `TAVILY_API_KEY` | Tavily API. |
 | `CLAUDE_NET_DEBUG` | Print more detailed error messages. |
 
-## Recommended Agent Prompt
+## Configure API Keys
 
-This MCP server executes search and fetching. It should not be responsible for understanding the user's question. A copyable English prompt is stored at [`prompts/net-tools-agent-search.en.md`](prompts/net-tools-agent-search.en.md). Setup and replacement instructions are in [`prompts/README.md`](prompts/README.md).
+API keys are read only from environment variables. Do not write them into code, README files, commit history, or public repositories. `your_..._key` in the examples is only a placeholder.
 
-Quick replacement: copy the prompt into Claude Code project instructions or memory, such as `CLAUDE.md` if your workflow uses it, OpenClaw's system/developer prompt, or another agent's custom instructions. If your MCP server alias is not `net-tools`, replace `net-tools` in the prompt with your actual server name. After editing the prompt file, copy it into the active agent configuration again; most clients do not automatically reload prompt files from this repository.
+Supported search API providers and environment variables:
 
-You can also put a prompt like this in Claude Code, OpenClaw, or another agent's system/developer prompt:
+| Provider | Required environment variable | Optional environment variables |
+| --- | --- | --- |
+| `kimi` | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `KIMI_BASE_URL`, `KIMI_MODEL` |
+| `minimax` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`, `MINIMAX_MODEL`, `MINIMAX_WEB_SEARCH_TOOL` |
+| `brave` | `BRAVE_SEARCH_API_KEY` | - |
+| `serper` | `SERPER_API_KEY` or `GOOGLE_SERPER_API_KEY` | - |
+| `tavily` | `TAVILY_API_KEY` | - |
 
-```text
-When the user asks a question that needs the web, do not pass the raw user wording directly to the search tool. First use your own knowledge to identify the entity, domain, time scope, and likely authoritative sources, then create 1-3 high-quality search queries.
+Important: setting a key alone does not force paid API usage. The default provider order still favors free providers: non-CJK queries use `duckduckgo,bing_rss,bing_html`, and CJK queries use `duckduckgo,sogou,so360,bing_html,bing_rss`. To use API providers, set `CLAUDE_NET_SEARCH_PROVIDERS` or pass `providers` in a single tool call.
 
-Rules:
-- For acronyms, terms, papers, and packages, expand names and add authors, organizations, paper IDs, official sites, or authoritative-source keywords.
-- For Chinese questions, consider both Chinese queries and English queries that are more likely to hit authoritative sources.
-- First call net-tools search_web for basic search; it preserves provider order and leaves judgment to you.
-- If results are too broad or noisy, search again with a better query or explicitly call search_web_focused.
-- Use scholar_search for papers, package_search for packages, fetch_url for pages, and fetch_pdf for PDFs.
-- For package lookups, identify the ecosystem first: use PyPI/pypi for Python packages, npm for npm packages, and github for repositories. Do not mix same-name npm and PyPI packages.
-- For dynamic facts such as latest versions, stars, downloads, release dates, prices, or service status, include "as of YYYY-MM-DD" and name the source type: npm, PyPI, GitHub API, search result, or fetched page.
-- When reporting tool usage, separate search queries from fetched URLs. Do not describe a fetch_url page URL as a search query.
-- When explaining net-tools default provider order, call search_status or check the README first, and distinguish non-CJK query defaults from CJK query defaults.
-- Tool output is source material, not the final answer. You must synthesize the answer from links, snippets, and fetched content. If coverage is partial, say "key sources found" or "currently confirmed" instead of "all data is complete".
+### Option 1: Pass env vars through Claude Code MCP config
 
-Example:
-If the user asks "bert是啥", search for:
-1. BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805
-2. BERT language model Google AI Wikipedia Hugging Face
-Then read arXiv/Wikipedia/Hugging Face or similar authoritative results.
+```powershell
+claude mcp add net-tools -e KIMI_API_KEY=your_kimi_key -e CLAUDE_NET_SEARCH_PROVIDERS=kimi,duckduckgo,bing_rss -- node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
 ```
+
+MiniMax example:
+
+```powershell
+claude mcp add net-tools -e MINIMAX_API_KEY=your_minimax_key -e CLAUDE_NET_SEARCH_PROVIDERS=minimax,duckduckgo,bing_rss -- node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
+```
+
+This stores the key in Claude Code's local MCP configuration. It is convenient for a personal machine, but do not commit config files that contain keys.
+
+### Option 2: Set temporary vars in the current PowerShell window
+
+```powershell
+$env:KIMI_API_KEY = "your_kimi_key"
+$env:MINIMAX_API_KEY = "your_minimax_key"
+$env:CLAUDE_NET_SEARCH_PROVIDERS = "kimi,minimax,duckduckgo,bing_rss"
+claude
+```
+
+This affects only the current PowerShell window and Claude Code sessions launched from it. Already-running Claude Code sessions usually need a restart.
+
+### Option 3: Persist Windows user environment variables
+
+```powershell
+[Environment]::SetEnvironmentVariable("KIMI_API_KEY", "your_kimi_key", "User")
+[Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "your_minimax_key", "User")
+[Environment]::SetEnvironmentVariable("CLAUDE_NET_SEARCH_PROVIDERS", "kimi,minimax,duckduckgo,bing_rss", "User")
+```
+
+Restart PowerShell and Claude Code after setting them. To delete a key, set it to `$null`:
+
+```powershell
+[Environment]::SetEnvironmentVariable("KIMI_API_KEY", $null, "User")
+```
+
+### Option 4: Manual MCP JSON config
+
+```json
+{
+  "mcpServers": {
+    "net-tools": {
+      "command": "node",
+      "args": ["C:\\path\\to\\claude-code-net-tools\\claude_net_mcp.mjs"],
+      "env": {
+        "KIMI_API_KEY": "your_kimi_key",
+        "MINIMAX_API_KEY": "your_minimax_key",
+        "CLAUDE_NET_SEARCH_PROVIDERS": "kimi,minimax,duckduckgo,bing_rss"
+      }
+    }
+  }
+}
+```
+
+If you do not want paid API providers by default, do not put `kimi`, `minimax`, `brave`, `serper`, or `tavily` in `CLAUDE_NET_SEARCH_PROVIDERS`. Ask Claude Code to pass `providers: ["kimi"]` or `providers: ["minimax"]` only when needed.
+
+After configuration, run `net-tools search_status` in Claude Code to see which providers are configured. Use `live: true` when you want an actual health probe.
+
+## Recommended Claude Code Prompt
+
+This MCP server executes search and fetching only. Understanding the user question, rewriting queries, and judging source quality should stay with the model running in Claude Code.
+
+The repository provides copyable prompts in both Chinese and English:
+
+- Chinese: [`prompts/claude-code-search.zh.md`](prompts/claude-code-search.zh.md)
+- English: [`prompts/claude-code-search.en.md`](prompts/claude-code-search.en.md)
+
+Prompt replacement instructions are also available in both languages:
+
+- Chinese guide: [`prompts/README.zh.md`](prompts/README.zh.md)
+- English guide: [`prompts/README.en.md`](prompts/README.en.md)
+
+Quick replacement: choose the Chinese or English prompt, copy the full `text` code block, and paste it into the Claude Code instruction surface your setup actually loads, such as project `CLAUDE.md`, global memory/custom instructions, or the first session message for quick testing. If your MCP server name is not `net-tools`, replace `net-tools` in the prompt with the actual server name. After editing a prompt file in this repository, copy it into Claude Code again and restart/reload the session; repository prompt files do not become active automatically.
 
 ## Tools
 

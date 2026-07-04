@@ -1,56 +1,18 @@
-# Prompt Setup Guide
+# Prompt Setup / 提示词配置
 
-This directory contains optional prompts for agents that use `claude-code-net-tools`.
+This directory keeps copyable Claude Code prompts for `claude-code-net-tools`.
+本目录存放可复制到 Claude Code 的 `claude-code-net-tools` 提示词。
 
-## Files
+## Prompt Files / 提示词文件
 
-- `net-tools-agent-search.en.md`: English prompt for query rewriting, source selection, and tool-use discipline.
+- Chinese: [`claude-code-search.zh.md`](claude-code-search.zh.md)
+- English: [`claude-code-search.en.md`](claude-code-search.en.md)
 
-## How To Use It
+## Setup Guides / 替换说明
 
-1. Install and enable this MCP server first. The default server name in the prompt is `net-tools`.
-2. Open your agent's system prompt, developer prompt, custom instructions, project instructions, or memory file.
-3. Copy the prompt block from `net-tools-agent-search.en.md` into that instruction area.
-4. If your MCP server alias is not `net-tools`, replace `net-tools` in the prompt with your actual alias.
-5. Save/reload the agent session so the new instructions are active.
+- 中文说明: [`README.zh.md`](README.zh.md)
+- English guide: [`README.en.md`](README.en.md)
 
-## Claude Code
+These files are source copies in the repository. Claude Code will not automatically load them from here. Copy the selected prompt into the Claude Code instruction surface that your setup actually uses.
 
-For Claude Code, put the prompt in the instruction surface your setup uses, for example:
-
-- project instructions such as `CLAUDE.md`, if your workflow uses one;
-- a user/global memory or custom instruction area, if configured;
-- the first message of a session, for quick testing.
-
-Keep the MCP server alias consistent with your install command. For example, if you added the server with:
-
-```powershell
-claude mcp add net-tools node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
-```
-
-then the prompt can keep `net-tools`. If you used another name, update the prompt text accordingly.
-
-## OpenClaw / Other Agents
-
-Paste the prompt into the agent's system/developer prompt field. If the client lets you define MCP tool preferences, make sure the tool names map to this server's tools:
-
-- `search_web`
-- `search_web_focused`
-- `search_status`
-- `scholar_search`
-- `package_search`
-- `fetch_url`
-- `fetch_json`
-- `fetch_rss`
-- `fetch_pdf`
-
-## How To Change The Prompt
-
-Edit `net-tools-agent-search.en.md`, then copy the updated prompt into your agent again. Most agents do not automatically reload prompt files from this repository; the file here is a source copy for humans to copy into the active agent configuration.
-
-Recommended edits:
-
-- Change `net-tools` to your MCP server alias.
-- Add preferred sources for your field, such as official docs, arXiv, PyPI, npm, GitHub, government sites, or company docs.
-- Add language preferences, for example "answer in Chinese but search English sources when they are more authoritative".
-- Add cost rules if you use paid API providers, for example "try free providers first; use API providers only after search_status shows free providers failing".
+这些文件只是仓库里的源文本，Claude Code 不会自动从这里读取。请选择中文或英文提示词，把内容复制到你当前 Claude Code 实际加载的指令位置。

@@ -1,6 +1,6 @@
-# Net Tools Agent Search Prompt (English)
+# Claude Code Net Tools Search Prompt (English)
 
-Use this prompt in Claude Code, OpenClaw, or another MCP-capable agent to make better use of `claude-code-net-tools`.
+Copy the block below into Claude Code project instructions, memory, or custom instructions to make better use of `claude-code-net-tools`.
 
 ```text
 When a user asks a question that may require web access, do not pass the raw user wording directly to the search tool. First use your own knowledge to infer the real entity, domain, time scope, and likely authoritative sources, then create 1-3 high-quality search queries.

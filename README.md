@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-Claude Code Net Tools 是一个本地 MCP server，为 Claude Code 和其他 MCP 客户端提供可配置网络出口的搜索、URL 抓取和内容提取工具。
+Claude Code Net Tools 是一个本地 MCP server，为 Claude Code 提供可配置网络出口的搜索、URL 抓取和内容提取工具。
 
 ## 解决的问题
 
@@ -77,7 +77,7 @@ Python 版：
 claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_mcp.py
 ```
 
-其他 MCP 客户端可以使用等价配置：
+也可以手动写等价 MCP 配置：
 
 ```json
 {
@@ -114,35 +114,98 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 | `TAVILY_API_KEY` | Tavily API。 |
 | `CLAUDE_NET_DEBUG` | 输出更详细的错误信息。 |
 
-## 推荐 Agent 提示词
+## 配置 API Key
 
-这个 MCP 的搜索工具只负责执行搜索和抓取材料，不负责理解用户问题。仓库里提供了一份可复制的英文提示词：[`prompts/net-tools-agent-search.en.md`](prompts/net-tools-agent-search.en.md)。启用和替换方法见 [`prompts/README.md`](prompts/README.md)。
+API key 只从环境变量读取，不要写进代码、README、提交记录或公开仓库。示例里的 `your_..._key` 都是占位符。
 
-简单换法：把提示词复制到 Claude Code 的项目说明/记忆文件（例如你的工作流使用的 `CLAUDE.md`）、OpenClaw 的 system/developer prompt，或其它 agent 的 custom instructions。若 MCP 服务名不是 `net-tools`，把提示词里的 `net-tools` 替换成你的实际服务名。修改提示词后，需要重新复制到 agent 的实际配置里；仓库文件本身不会被多数客户端自动读取。
+支持的搜索 API provider 和变量名：
 
-也可以直接把下面这段放进 Claude Code、OpenClaw 或其它 agent 的 system/developer prompt：
+| Provider | 必填环境变量 | 可选环境变量 |
+| --- | --- | --- |
+| `kimi` | `KIMI_API_KEY` 或 `MOONSHOT_API_KEY` | `KIMI_BASE_URL`、`KIMI_MODEL` |
+| `minimax` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`、`MINIMAX_MODEL`、`MINIMAX_WEB_SEARCH_TOOL` |
+| `brave` | `BRAVE_SEARCH_API_KEY` | - |
+| `serper` | `SERPER_API_KEY` 或 `GOOGLE_SERPER_API_KEY` | - |
+| `tavily` | `TAVILY_API_KEY` | - |
 
-```text
-当用户提出需要联网的问题时，不要把原问题机械传给搜索工具。先用你的已有知识判断用户真正想查的实体、领域、时间范围和可能的权威来源，然后生成 1-3 个高质量搜索 query。
+注意：只配置 key 不等于一定会调用付费 API。当前默认 provider 顺序仍以免费搜索为主：非 CJK query 默认 `duckduckgo,bing_rss,bing_html`，CJK query 默认 `duckduckgo,sogou,so360,bing_html,bing_rss`。如果要让 API provider 参与搜索，需要设置 `CLAUDE_NET_SEARCH_PROVIDERS`，或在单次工具调用里传 `providers`。
 
-优先规则：
-- 对简称、术语、论文、软件包，先补全全称、英文名、作者/机构、论文编号、官网或权威来源关键词。
-- 对中文问题，可以同时生成中文 query 和更容易命中权威资料的英文 query。
-- 先调用 net-tools search_web 执行基础搜索，保留原始 provider 顺序；不要依赖工具替你判断结果好坏。
-- 如果结果太泛或太吵，再用更具体的 query 重搜，或显式调用 search_web_focused。
-- 论文用 scholar_search，软件包用 package_search，网页正文用 fetch_url，PDF 用 fetch_pdf。
-- 查软件包时必须先判断生态：Python 包显式用 PyPI/pypi，npm 包显式用 npm，GitHub 仓库显式用 github；不要把同名 npm 包和 PyPI 包混用。
-- 涉及“最新版本、stars、下载量、发布日期、价格、状态”等动态信息时，必须写明“截至 YYYY-MM-DD”，并说明来源是 npm、PyPI、GitHub API、搜索结果还是页面抓取。
-- 记录工具调用时要区分 search query 和 fetch URL；不要把 fetch_url 读取的页面 URL 写成搜索 query。
-- 解释 net-tools 默认 provider 顺序时，先调用 search_status 或查 README，并区分非中文 query 和中文 query 的默认顺序。
-- 工具返回的是材料，不是最终答案；最终答案必须由你综合结果、链接和上下文判断。资料不完整时用“关键资料已查到/目前可确认”，不要写“数据全部到位”。
+### 方式 1：Claude Code MCP 配置里传入（最直接）
 
-例子：
-用户问“bert是啥”时，可以先搜索：
-1. BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805
-2. BERT language model Google AI Wikipedia Hugging Face
-然后再读取 arXiv/Wikipedia/Hugging Face 等结果。
+```powershell
+claude mcp add net-tools -e KIMI_API_KEY=your_kimi_key -e CLAUDE_NET_SEARCH_PROVIDERS=kimi,duckduckgo,bing_rss -- node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
 ```
+
+MiniMax 示例：
+
+```powershell
+claude mcp add net-tools -e MINIMAX_API_KEY=your_minimax_key -e CLAUDE_NET_SEARCH_PROVIDERS=minimax,duckduckgo,bing_rss -- node C:\path\to\claude-code-net-tools\claude_net_mcp.mjs
+```
+
+这个方式会把 key 存在 Claude Code 的本地 MCP 配置里。适合个人机器；不要把带 key 的配置文件提交到仓库。
+
+### 方式 2：PowerShell 当前窗口临时设置
+
+```powershell
+$env:KIMI_API_KEY = "your_kimi_key"
+$env:MINIMAX_API_KEY = "your_minimax_key"
+$env:CLAUDE_NET_SEARCH_PROVIDERS = "kimi,minimax,duckduckgo,bing_rss"
+claude
+```
+
+这种方式只对当前 PowerShell 窗口和从这个窗口启动的 Claude Code 生效。已经打开的 Claude Code 会话通常需要重启。
+
+### 方式 3：Windows 用户环境变量持久设置
+
+```powershell
+[Environment]::SetEnvironmentVariable("KIMI_API_KEY", "your_kimi_key", "User")
+[Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "your_minimax_key", "User")
+[Environment]::SetEnvironmentVariable("CLAUDE_NET_SEARCH_PROVIDERS", "kimi,minimax,duckduckgo,bing_rss", "User")
+```
+
+设置后重启 PowerShell 和 Claude Code。删除某个 key 时可以把值设为 `$null`：
+
+```powershell
+[Environment]::SetEnvironmentVariable("KIMI_API_KEY", $null, "User")
+```
+
+### 方式 4：手动 MCP JSON 配置
+
+```json
+{
+  "mcpServers": {
+    "net-tools": {
+      "command": "node",
+      "args": ["C:\\path\\to\\claude-code-net-tools\\claude_net_mcp.mjs"],
+      "env": {
+        "KIMI_API_KEY": "your_kimi_key",
+        "MINIMAX_API_KEY": "your_minimax_key",
+        "CLAUDE_NET_SEARCH_PROVIDERS": "kimi,minimax,duckduckgo,bing_rss"
+      }
+    }
+  }
+}
+```
+
+如果你不想默认使用付费 API，就不要把 `kimi`、`minimax`、`brave`、`serper`、`tavily` 写进 `CLAUDE_NET_SEARCH_PROVIDERS`。需要时让 Claude Code 在单次调用里传 `providers: ["kimi"]` 或 `providers: ["minimax"]` 即可。
+
+配置后可在 Claude Code 里运行 `net-tools search_status` 查看哪些 provider 已配置；需要实际探测时用 `live: true`。
+
+## 推荐 Claude Code 提示词
+
+这个 MCP 的搜索工具只负责执行搜索和抓取材料，不负责理解用户问题。问题理解、query 改写和来源判断应该交给 Claude Code 当前连接的模型完成。
+
+仓库里提供中英两版可复制提示词：
+
+- 中文：[`prompts/claude-code-search.zh.md`](prompts/claude-code-search.zh.md)
+- English：[`prompts/claude-code-search.en.md`](prompts/claude-code-search.en.md)
+
+提示词替换说明也有中英两版：
+
+- 中文说明：[`prompts/README.zh.md`](prompts/README.zh.md)
+- English guide：[`prompts/README.en.md`](prompts/README.en.md)
+
+快速换法：选择中文或英文提示词，复制其中的整个 `text` 代码块，粘贴到 Claude Code 实际加载的指令位置，例如项目里的 `CLAUDE.md`、全局记忆/自定义指令，或临时测试时的会话首条消息。如果你的 MCP 服务名不是 `net-tools`，把提示词里的 `net-tools` 改成实际服务名。修改仓库里的提示词文件后，需要重新复制到 Claude Code 配置并重启/reload 会话；仓库文件本身不会自动生效。
 
 ## 工具
 
