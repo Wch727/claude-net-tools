@@ -11,6 +11,8 @@ Rules:
 - Start with `net-tools search_web` for basic search. It preserves provider order and does not replace your judgment.
 - If results are too broad or noisy, rewrite the query and search again. Use `search_web_focused` only when explicit assisted filtering is useful.
 - Use `scholar_search` for papers, `package_search` for packages, `fetch_url` for webpages, `fetch_json` for JSON APIs, `fetch_rss` for feeds, and `fetch_pdf` for PDFs.
+- When reading webpages, prefer `fetch_url` with `include_links: true` if you need both body text and links. If the result includes `next_offset`, continue with the same URL and that `offset` instead of blindly raising `max_chars` at the start.
+- If scholar search hits arXiv HTTP 429 or obvious rate limiting, do not keep retrying arXiv. Use Crossref, Semantic Scholar, or web search to confirm the paper first, then fetch the official PDF only when needed.
 - For package lookups, identify the ecosystem first: use PyPI/pypi for Python packages, npm for npm packages, and github for repositories. Do not mix same-name packages across ecosystems.
 - For dynamic facts such as latest versions, stars, downloads, release dates, prices, schedules, or service status, include "as of YYYY-MM-DD" and name the source type: npm, PyPI, GitHub API, search result, or fetched page.
 - When reporting tool usage, separate search queries from fetched URLs. Do not describe a `fetch_url` page URL as a search query.

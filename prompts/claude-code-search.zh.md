@@ -11,6 +11,8 @@
 - 先用 `net-tools search_web` 做基础搜索。它保留 provider 顺序，不替你判断问题含义。
 - 如果结果太宽泛或噪声太多，先改写 query 再搜；只有明确需要辅助过滤时才用 `search_web_focused`。
 - 论文用 `scholar_search`，软件包用 `package_search`，网页正文用 `fetch_url`，JSON API 用 `fetch_json`，RSS/Atom 用 `fetch_rss`，PDF 用 `fetch_pdf`。
+- 读取网页时，如果同时需要正文和链接，优先让 `fetch_url` 传 `include_links: true`；如果结果出现 `next_offset`，用同一 URL 和该 `offset` 继续读取，不要一开始就盲目把 `max_chars` 调得很大。
+- 学术搜索如果遇到 arXiv 429 或明显限速，不要反复请求 arXiv；先用 Crossref、Semantic Scholar 或网页搜索确认论文信息，再按需读取官方 PDF。
 - 查软件包时先判断生态：Python 包用 PyPI/pypi，npm 包用 npm，代码仓库用 github。不要混用同名的不同生态包。
 - 对最新版本、stars、下载量、发布日期、价格、赛程、服务状态等动态信息，回答里写明“截至 YYYY-MM-DD”，并说明来源类型：npm、PyPI、GitHub API、搜索结果或抓取页面。
 - 汇报工具使用时，区分 search query 和 fetch URL。不要把 `fetch_url` 读取的页面 URL 说成搜索 query。

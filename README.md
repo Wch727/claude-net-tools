@@ -45,7 +45,7 @@ cd claude-code-net-tools
 
 - Poppler `pdftotext`：用于 `fetch_pdf` 提取 PDF 文本。安装后把 `pdftotext` 放进 PATH，或设置 `CLAUDE_NET_PDFTOTEXT` 指向可执行文件。若本机 `pdftotext` 有问题，先用 `pdf_status` 诊断；也可以在 `fetch_pdf` 里传 `extractor: "none"` 只验证 PDF 下载。
 - 搜索 API key：只通过环境变量传入，例如 `BRAVE_SEARCH_API_KEY`、`KIMI_API_KEY`、`MINIMAX_API_KEY`、`SERPER_API_KEY`、`TAVILY_API_KEY`。
-- 本地代理/VPN：设置 `CLAUDE_NET_PROXY`，例如 `http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。设置为 `direct` 可强制直连。
+- 本地代理/VPN：可以设置 `CLAUDE_NET_PROXY`，例如 `http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。未设置时工具会尝试常见本地代理端口；端口列表可用 `CLAUDE_NET_PROXY_PORTS` 调整。设置为 `direct` 可强制直连。
 
 ### Python 版（备用）
 
@@ -101,9 +101,15 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 | --- | --- |
 | `CLAUDE_NET_PROXY` | 强制网络出口。支持 `http://`、`https://`、`socks5h://`（Node/curl 版）或 `direct`。 |
 | `CLAUDE_NET_HTTP_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` | 未设置 `CLAUDE_NET_PROXY` 时的代理回退。 |
+| `CLAUDE_NET_PROXY_PORTS` | 未指定代理时自动探测的本地端口列表，例如 `7890,7897,1080`。 |
 | `CLAUDE_NET_SEARCH_PROVIDERS` | 覆盖搜索 provider 顺序，例如 `kimi,minimax,duckduckgo,bing_rss`。 |
+| `CLAUDE_NET_SCHOLAR_PROVIDERS` | 覆盖学术搜索 provider 顺序，例如 `crossref,semantic_scholar,arxiv`。 |
 | `CLAUDE_NET_DISABLED_PROVIDERS` | 禁用指定 provider，例如 `duckduckgo,bing_html`。 |
 | `CLAUDE_NET_PROVIDER_FAIL_LIMIT` | provider 连续失败多少次后自动跳过，默认 `3`。 |
+| `CLAUDE_NET_ARXIV_COOLDOWN_MS` | arXiv 返回 429 后的冷却时间，默认 `5000` 毫秒。 |
+| `CLAUDE_NET_DEFAULT_MAX_CHARS` | `fetch_url` 默认返回字符数，默认 `12000`。 |
+| `CLAUDE_NET_MAX_OUTPUT_CHARS` | 单次工具输出的最大字符数，默认 `200000`。 |
+| `CLAUDE_NET_MAX_FETCH_BYTES` | 单次下载的最大字节数，默认由版本决定，可用于限制大文件。 |
 | `CLAUDE_NET_CURL` | Node/curl 版自定义 curl 路径。 |
 | `CLAUDE_NET_PDFTOTEXT` | 自定义 `pdftotext` 路径。 |
 | `CLAUDE_NET_COOKIE_DIR` | cookie jar 存储目录。 |
@@ -191,6 +197,18 @@ claude
 
 配置后可在 Claude Code 里运行 `net-tools search_status` 查看哪些 provider 已配置；需要实际探测时用 `live: true`。
 
+## 网络出口和 provider 策略
+
+默认情况下，工具会按顺序尝试可用网络出口：显式 `CLAUDE_NET_PROXY`、环境变量代理、常见本地代理端口、直连。这样可以适配本机代理/VPN、公司代理和普通直连环境。若你的代理端口不是常见端口，设置 `CLAUDE_NET_PROXY_PORTS`；若你只想直连，设置 `CLAUDE_NET_PROXY=direct`。
+
+网页搜索和学术搜索是两套 provider 顺序：
+
+- `CLAUDE_NET_SEARCH_PROVIDERS` 控制 `search_web` 和 `search_web_focused`。
+- `CLAUDE_NET_SCHOLAR_PROVIDERS` 控制 `scholar_search`。
+- `CLAUDE_NET_DISABLED_PROVIDERS` 对两类 provider 都生效，适合临时禁用不稳定或成本较高的 provider。
+
+`scholar_search` 默认优先 `crossref,semantic_scholar,arxiv`。arXiv 对同一出口 IP 有频率限制；工具遇到 429 会进入短暂冷却，不会继续对同一个 query 连发多种 arXiv 请求。明确需要 arXiv 时可以把 `arxiv` 放进 providers；如果近期频繁 429，可以设置 `CLAUDE_NET_DISABLED_PROVIDERS=arxiv`，先用 Crossref 和 Semantic Scholar。
+
 ## 推荐 Claude Code 提示词
 
 这个 MCP 的搜索工具只负责执行搜索和抓取材料，不负责理解用户问题。问题理解、query 改写和来源判断应该交给 Claude Code 当前连接的模型完成。
@@ -214,10 +232,10 @@ claude
 - `search_status`：查看搜索 provider 的 key 配置、禁用状态、最近成功/失败和可选 live 探测。
 - `search_web`：基础网页搜索。默认只做 provider 失败降级、去重和域名过滤；不扩写 query、不做严格相关性过滤、不做启发式重排、不主动探测跳转最终 URL。让 LLM 先写好 query，再用它拿材料。
 - `search_web_focused`：显式增强网页搜索。支持 cleaned core query 扩展、严格相关性过滤、可选重排和可选跳转解析；适合基础搜索太吵时再用。
-- `scholar_search`：专项搜索论文，当前支持 Semantic Scholar、Crossref、arXiv。论文简称最好由 LLM 先扩写成带全称/作者/编号的 query；工具内部也会为短简称多抓一些 arXiv 早期候选。
+- `scholar_search`：专项搜索论文，当前支持 Crossref、Semantic Scholar、arXiv。论文简称最好由 LLM 先扩写成带全称/作者/编号的 query；默认把 arXiv 放在后面，并在遇到 429 时冷却，减少限速压力。
 - `package_search`：专项搜索开发包和仓库，当前支持 npm、PyPI、GitHub repositories。
-- `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/readable/text/markdown/raw` 提取模式；`auto` 默认使用正文抽取。
-- `extract_links`：抓取页面并提取规范化链接，可限制同域名。
+- `fetch_url`：抓取 URL，支持 `GET/POST/PUT/PATCH/DELETE`、自定义 headers、cookies、cookie jar、body，以及 `auto/readable/text/markdown/raw` 提取模式；支持 `offset`/`next_offset` 分页读取长文本，也可用 `include_links` 在同一次抓取里提取链接。
+- `extract_links`：抓取页面并提取规范化链接，可限制同域名。若你同时需要正文和链接，优先用 `fetch_url` 的 `include_links`。
 - `fetch_json`：抓取 JSON endpoint 并格式化输出。
 - `fetch_rss`：抓取 RSS/Atom feed 并输出条目。
 - `fetch_pdf`：下载 PDF，并在安装 `pdftotext` 时提取文本；支持 `extractor: auto|pdftotext|none`。
@@ -232,6 +250,8 @@ Use net-tools pdf_status.
 Use net-tools search_status.
 Use net-tools search_web to search "Claude Code MCP" count 5.
 Use net-tools fetch_url to read https://example.com with extract readable.
+Use net-tools fetch_url to read https://example.com with extract readable include_links true link_limit 10.
+Use net-tools fetch_url to continue from next_offset when the previous result says it was truncated.
 Use net-tools fetch_url to read https://example.com as markdown.
 Use net-tools extract_links to list same-domain links from https://example.com.
 Use net-tools fetch_json to read https://api.github.com/repos/Wch727/claude-code-net-tools.
@@ -265,6 +285,14 @@ Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5
 }
 ```
 
+## 长页面、会话和 PDF
+
+`fetch_url` 的 `max_chars` 是单次输出上限，不代表页面只下载这么多字符。结果里如果出现 `next_offset`，继续调用同一个 URL，并把 `offset` 设成 `next_offset` 即可分段读取。这样读长文档时不需要反复猜一个很大的 `max_chars`。
+
+`cookie_jar` 可以保存同一 jar 名称下的 cookie，适合简单的连续请求；但它不是完整浏览器会话，不自动处理复杂登录、CSRF 流程、验证码或前端 JavaScript 状态。需要登录态或动态页面时，后续应配合浏览器自动化 MCP。
+
+`fetch_pdf` 依赖本机 `pdftotext` 抽取文本。它适合快速读摘要、引言、结论和参考信息；对公式、表格、图片说明、复杂版式的论文，纯文本结果可能乱序。遇到这类文档，建议先用 `fetch_pdf extractor=none` 验证下载，再用本机 PDF 阅读器或后续浏览器/OCR 能力处理。
+
 ## 说明和限制
 
 这个工具不是完整浏览器。它不执行 JavaScript、不保留网页登录态、不处理验证码。动态页面、需要登录的网站，建议后续配合浏览器自动化 MCP（例如 Playwright/Chromium）使用。
@@ -275,6 +303,22 @@ Use net-tools search_web to search "Attention Is All You Need arxiv pdf" count 5
 - 增加浏览器 cookie 导入或会话桥接。
 - 增加 OCR、截图、页面结构化抽取。
 - 增加更多搜索 provider，并把 provider 失败原因暴露得更清楚。
+
+## Claude Code 烟测题
+
+安装或改配置后，建议在 Claude Code 里按顺序问这些题。它们能覆盖网络出口、搜索、抓取、分页、学术搜索和 PDF。
+
+```text
+Use net-tools proxy_status.
+Use net-tools search_status.
+Use net-tools search_web to search "叶兰峰是谁" count 5.
+Use net-tools search_web to search "BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805" count 5, then summarize the key sources.
+Use net-tools fetch_url to read https://example.com with extract readable include_links true link_limit 10.
+Use net-tools scholar_search to search "Attention Is All You Need Vaswani 2017 transformer" count 5.
+Use net-tools search_web to search "Attention Is All You Need arXiv PDF" count 5, choose the official arXiv PDF, then use net-tools fetch_pdf to read it.
+```
+
+好的结果不要求所有 provider 都成功，但应满足：能显示当前 route；至少一个搜索 provider 可用；`fetch_url` 能返回正文、状态码和必要时的 `next_offset`；`scholar_search` 不应因 arXiv 429 一直连发请求；PDF 如果本机 `pdftotext` 不可用，应给出明确诊断。
 
 ## 开发检查
 
