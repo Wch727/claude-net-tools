@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import readline from "node:readline";
-import { promisify } from "node:util";
+import { promisify, TextDecoder } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SERVER_NAME = "claude-code-net-tools";
@@ -320,10 +320,10 @@ function cleanUrl(url) {
   url = decodeEntities(String(url || "").trim());
   if (url.startsWith("//")) url = `https:${url}`;
   try {
-    const parsed = new URL(url);
-    if (domainOf(url).endsWith("duckduckgo.com") && parsed.pathname.startsWith("/l/")) {
+    const parsed = new URL(url.startsWith("/") ? url : url, url.startsWith("/") ? "https://duckduckgo.com" : undefined);
+    if ((domainOf(parsed.href).endsWith("duckduckgo.com") || url.startsWith("/l/")) && parsed.pathname.startsWith("/l/")) {
       const uddg = parsed.searchParams.get("uddg");
-      if (uddg) return uddg;
+      if (uddg) return decodeEntities(uddg);
     }
     if (domainOf(url).endsWith("sogou.com") && parsed.pathname.includes("/link")) {
       for (const key of ["url", "u"]) {
@@ -609,13 +609,51 @@ function localProxyPorts() {
   return ports.length ? ports : DEFAULT_LOCAL_PROXY_PORTS;
 }
 
+function charsetFromContentType(contentType = "") {
+  const match = String(contentType || "").match(/charset=["']?([^;\s"']+)/i);
+  return match ? match[1] : "";
+}
+
+function charsetFromHtml(buffer) {
+  const head = buffer.subarray(0, Math.min(buffer.length, 8192)).toString("latin1");
+  const match = head.match(/<meta\b[^>]+charset=["']?([^\s"'>/;]+)/i) || head.match(/<meta\b[^>]+content=["'][^"']*charset=([^\s"'>;]+)/i);
+  return match ? match[1] : "";
+}
+
+function normalizeCharset(charset = "") {
+  const value = String(charset || "").trim().toLowerCase().replace(/^['"]|['"]$/g, "");
+  if (["gb2312", "gbk", "gb18030", "hz-gb-2312"].includes(value)) return "gb18030";
+  if (["utf8", "unicode-1-1-utf-8"].includes(value)) return "utf-8";
+  if (["latin1", "iso8859-1"].includes(value)) return "iso-8859-1";
+  return value;
+}
+
+function decodeBodyBuffer(buffer, contentType = "") {
+  if (!Buffer.isBuffer(buffer)) return String(buffer || "");
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return buffer.subarray(3).toString("utf8");
+  const candidates = [charsetFromContentType(contentType), charsetFromHtml(buffer), "utf-8", "gb18030", "windows-1252", "iso-8859-1"].map(normalizeCharset).filter(Boolean);
+  const seen = new Set();
+  for (const charset of candidates) {
+    if (seen.has(charset)) continue;
+    seen.add(charset);
+    try {
+      return new TextDecoder(charset, { fatal: false }).decode(buffer);
+    } catch {}
+  }
+  return buffer.toString("utf8");
+}
+
 function splitCurlMeta(stdout) {
-  const marker = "\n__CLAUDE_NET_META__";
-  const index = stdout.lastIndexOf(marker);
-  if (index < 0) return { text: stdout, status: "", contentType: "", finalUrl: "" };
-  const text = stdout.slice(0, index);
-  const [status = "", contentType = "", finalUrl = ""] = stdout.slice(index + marker.length).trim().split("\t");
-  return { text, status, contentType, finalUrl };
+  const buffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout || ""), "utf8");
+  const marker = Buffer.from("\n__CLAUDE_NET_META__", "utf8");
+  const index = buffer.lastIndexOf(marker);
+  if (index < 0) {
+    return { text: decodeBodyBuffer(buffer), bodyBuffer: buffer, status: "", contentType: "", finalUrl: "" };
+  }
+  const bodyBuffer = buffer.subarray(0, index);
+  const metaText = buffer.subarray(index + marker.length).toString("utf8").trim();
+  const [status = "", contentType = "", finalUrl = ""] = metaText.split("\t");
+  return { text: decodeBodyBuffer(bodyBuffer, contentType), bodyBuffer, status, contentType, finalUrl };
 }
 
 async function curlRequest(url, { method = "GET", headers = {}, body = null, timeout = 12, maxBytes = 900000, cookies = null, cookieJar = "" } = {}) {
@@ -632,7 +670,7 @@ async function curlRequest(url, { method = "GET", headers = {}, body = null, tim
     if (body !== null && body !== undefined) args.push("--data-raw", typeof body === "string" ? body : JSON.stringify(body));
     args.push(url);
     try {
-      const { stdout } = await execFileAsync(CURL, args, { encoding: "utf8", windowsHide: true, maxBuffer: maxBytes + 65536, timeout: (timeout + 3) * 1000 });
+      const { stdout } = await execFileAsync(CURL, args, { encoding: "buffer", windowsHide: true, maxBuffer: maxBytes + 65536, timeout: (timeout + 3) * 1000 });
       const meta = splitCurlMeta(stdout);
       return { text: meta.text, route: proxy || "direct", status: meta.status, contentType: meta.contentType, finalUrl: meta.finalUrl || url };
     } catch (error) {
@@ -996,8 +1034,8 @@ function baseProviderOrder(query, override) {
   if (Array.isArray(override) && override.length) return override.map(normalizeProviderName);
   const env = String(process.env.CLAUDE_NET_SEARCH_PROVIDERS || "").trim();
   if (env) return splitList(env).map(normalizeProviderName);
-  if (isCjk(query)) return ["duckduckgo", "sogou", "so360", "bing_html", "bing_rss"];
-  return ["duckduckgo", "bing_rss", "bing_html"];
+  if (isCjk(query)) return ["bing_rss", "bing_html", "sogou", "so360", "duckduckgo"];
+  return ["bing_rss", "duckduckgo", "bing_html"];
 }
 
 function dedupeProviders(providers) {
@@ -1622,6 +1660,26 @@ function looksFeed(text, contentType = "") {
   return /rss|atom|xml/i.test(contentType) && /<(rss|feed|rdf)/i.test(trimmed) || /<(rss|feed|rdf)/i.test(trimmed);
 }
 
+function fetchDiagnostics({ text = "", output = "", status = "", contentType = "", isHtml = false } = {}) {
+  const haystack = normalizeSpace(`${text.slice(0, 12000)} ${output.slice(0, 4000)}`).toLowerCase();
+  const signals = [];
+  const code = Number(status || 0);
+  if (Number.isFinite(code) && code >= 400) signals.push(`HTTP ${code}: server returned an error/blocked status; fetched text may be an error page, not the target content.`);
+  if (/captcha|verify you are human|checking if the site connection is secure|cloudflare|access denied|forbidden|security check|unusual traffic|enable javascript|enable cookies|request blocked|akamai|perimeterx|datadome/i.test(haystack)) {
+    signals.push("Possible anti-bot, captcha, or security-check page detected; use browser automation or authenticated/API access if this page requires it.");
+  }
+  if (/[验驗]证[码碼]|人机[验驗]证|安全[验驗]证|访问受限|訪問受限|请求被拦截|請開啟|请开启|启用 javascript|啟用 javascript|登录后查看|登入後查看/i.test(haystack)) {
+    signals.push("Possible Chinese anti-bot/login/security page detected; this is probably not the article/body content.");
+  }
+  if (isHtml && output.trim().length < 160 && /<script\b/i.test(text) && !/<p\b|<article\b|<main\b/i.test(text)) {
+    signals.push("The page looks like a JavaScript-rendered shell with little extractable text; use a browser automation MCP for rendered content.");
+  }
+  if (/anthropic|terms of service|acceptable use|safety policy/i.test(haystack) && output.trim().length < 600) {
+    signals.push("The extracted text looks like a policy/refusal/interstitial page rather than normal site content; check status/final URL or fetch with extract=raw.");
+  }
+  return [...new Set(signals)];
+}
+
 function tagText(block, tag) {
   const match = String(block || "").match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
   return normalizeSpace(stripTags(match?.[1] || ""));
@@ -1710,6 +1768,11 @@ function formatFetchedContent(response, args = {}) {
     lines.push("Format: raw");
   }
   if (title) lines.push(`Title: ${title}`);
+  const diagnostics = fetchDiagnostics({ text, output: body, status: response.status, contentType, isHtml });
+  if (diagnostics.length) {
+    lines.push("Fetch diagnostics:");
+    diagnostics.forEach((item) => lines.push("- " + item));
+  }
   const fullBody = body || "(No extractable text.)";
   const start = Math.min(offset, fullBody.length);
   const end = Math.min(start + maxChars, fullBody.length);

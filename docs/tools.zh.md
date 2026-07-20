@@ -63,4 +63,4 @@
 
 ## 浏览器边界
 
-这个工具不是完整浏览器。它不执行 JavaScript、不保留浏览器登录态、不处理验证码。动态页面、需要登录的网站，建议配合浏览器自动化 MCP（例如 Playwright/Chromium）使用。
+这个工具不是完整浏览器。它不执行 JavaScript、不保留浏览器登录态、不处理验证码。动态页面、需要登录的网站，建议配合浏览器自动化 MCP（例如 Playwright/Chromium）使用。它也不绕过 Claude Code 模型侧的安全策略；新增的 fetch diagnostics 只用于识别反爬、验证码、登录页、JS 壳或策略提示页，避免把这些页面误当正文。

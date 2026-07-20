@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -123,6 +123,17 @@ function propertyKeys(tool) {
   return Object.keys(tool.inputSchema?.properties || {}).sort();
 }
 
+function findPython() {
+  const candidates = process.platform === "win32"
+    ? [{ command: "python", args: [] }, { command: "py", args: ["-3"] }, { command: "python3", args: [] }]
+    : [{ command: "python3", args: [] }, { command: "python", args: [] }];
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate.command, [...candidate.args, "--version"], { encoding: "utf8", windowsHide: true });
+    if (!result.error && result.status === 0) return candidate;
+  }
+  return null;
+}
+
 async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
   const client = new McpClient(label, command, args, cleanEnv(baseUrl, label));
   try {
@@ -155,6 +166,16 @@ async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
 
     const continued = await client.callTool("fetch_url", { url: `${baseUrl}/page`, extract: "readable", max_chars: 500, offset: 500 });
     assertIncludes(continued, "Content range: characters 500-", `${label} fetch_url offset`);
+
+    const gbk = await client.callTool("fetch_url", { url: `${baseUrl}/gbk`, extract: "readable", max_chars: 800 });
+    assertIncludes(gbk, "中文", `${label} gbk charset decode`);
+
+    const blocked = await client.callTool("fetch_url", { url: `${baseUrl}/blocked`, extract: "readable", max_chars: 800 });
+    assertIncludes(blocked, "Fetch diagnostics:", `${label} blocked diagnostics`);
+    assertIncludes(blocked, "Possible anti-bot", `${label} blocked diagnostics`);
+
+    const linksPage = await client.callTool("fetch_url", { url: `${baseUrl}/links`, extract: "readable", include_links: true, link_limit: 5 });
+    assertIncludes(linksPage, "https://example.com/target", `${label} ddg relative redirect link`);
 
     const sessionCreated = await client.callTool("session_create", { name: "smoke", headers: { "X-Session-Test": "alpha" }, cookies: { token: "abc" }, referer: `${baseUrl}/ref` });
     assertIncludes(sessionCreated, "Session saved:", `${label} session_create`);
@@ -195,7 +216,25 @@ const server = http.createServer((req, res) => {
     res.end(`<!doctype html><html><head><title>Fixture</title></head><body><article><h1>Fixture Page</h1><p>${longText}</p><a href="/alpha">Alpha</a><a href="/beta">Beta</a><a href="https://example.org/out">External</a></article></body></html>`);
     return;
   }
-  if (url.pathname === "/echo") {
+  if (url.pathname === "/gbk") {
+    res.writeHead(200, { "content-type": "text/html; charset=gb2312" });
+    res.end(Buffer.concat([
+      Buffer.from("<!doctype html><html><head><title>GBK</title></head><body><article><h1>GBK</h1><p>", "ascii"),
+      Buffer.from([0xd6, 0xd0, 0xce, 0xc4]),
+      Buffer.from("</p></article></body></html>", "ascii"),
+    ]));
+    return;
+  }
+  if (url.pathname === "/blocked") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end("<!doctype html><html><head><title>Just a moment...</title><script>window.__cf=true</script></head><body>Checking if the site connection is secure. Enable JavaScript and cookies to continue. Cloudflare captcha security check.</body></html>");
+    return;
+  }
+  if (url.pathname === "/links") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end('<!doctype html><html><body><main><p>Links fixture</p><a href="/l/?uddg=https%3A%2F%2Fexample.com%2Ftarget">Target</a></main></body></html>');
+    return;
+  }  if (url.pathname === "/echo") {
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
       "x-session-test": req.headers["x-session-test"] || "",
@@ -218,13 +257,17 @@ const port = await listen(server);
 const baseUrl = `http://127.0.0.1:${port}`;
 try {
   const nodeTools = await runRuntime("node", process.execPath, [nodeServer], baseUrl, arxivHitCounter);
-  const pythonTools = await runRuntime("python", "python", [pythonServer], baseUrl, arxivHitCounter);
-
-  const nodeMap = toolMap(nodeTools);
-  const pythonMap = toolMap(pythonTools);
-  assert.deepEqual([...nodeMap.keys()].sort(), [...pythonMap.keys()].sort(), "Node/Python tool names diverged");
-  for (const name of nodeMap.keys()) {
-    assert.deepEqual(propertyKeys(nodeMap.get(name)), propertyKeys(pythonMap.get(name)), `Node/Python schema properties diverged for ${name}`);
+  const python = findPython();
+  if (python) {
+    const pythonTools = await runRuntime("python", python.command, [...python.args, pythonServer], baseUrl, arxivHitCounter);
+    const nodeMap = toolMap(nodeTools);
+    const pythonMap = toolMap(pythonTools);
+    assert.deepEqual([...nodeMap.keys()].sort(), [...pythonMap.keys()].sort(), "Node/Python tool names diverged");
+    for (const name of nodeMap.keys()) {
+      assert.deepEqual(propertyKeys(nodeMap.get(name)), propertyKeys(pythonMap.get(name)), `Node/Python schema properties diverged for ${name}`);
+    }
+  } else {
+    console.warn("Skipping Python MCP runtime smoke: Node child_process could not spawn a Python 3 interpreter in this environment.");
   }
   console.log("MCP regression tests passed for Node and Python builds.");
 } finally {

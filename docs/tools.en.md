@@ -63,4 +63,4 @@ Rules:
 
 ## Browser Boundary
 
-This tool is not a full browser. It does not execute JavaScript, keep browser login sessions, or solve captchas. For dynamic or login-only pages, pair it with a browser automation MCP such as Playwright/Chromium.
+This tool is not a full browser. It does not execute JavaScript, keep browser login sessions, or solve captchas. For dynamic or login-only pages, pair it with a browser automation MCP such as Playwright/Chromium. It also does not bypass Claude Code model-side safety decisions; fetch diagnostics only identify anti-bot, captcha, login, JavaScript shell, or policy/interstitial pages so they are not mistaken for article content.

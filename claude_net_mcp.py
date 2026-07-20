@@ -145,12 +145,12 @@ def _clean_url(url: str) -> str:
     url = html.unescape(str(url or "").strip())
     if url.startswith("//"):
         url = "https:" + url
-    parsed = urllib.parse.urlparse(url)
+    parsed = urllib.parse.urlparse(urllib.parse.urljoin("https://duckduckgo.com", url) if url.startswith("/") else url)
     host = parsed.netloc.lower().removeprefix("www.")
-    if host.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+    if (host.endswith("duckduckgo.com") or url.startswith("/l/")) and parsed.path.startswith("/l/"):
         query = urllib.parse.parse_qs(parsed.query)
         if query.get("uddg"):
-            return query["uddg"][0]
+            return html.unescape(query["uddg"][0])
     if host.endswith("sogou.com") and "/link" in parsed.path:
         query = urllib.parse.parse_qs(parsed.query)
         for key in ("url", "u"):
@@ -980,8 +980,8 @@ def _provider_order(query: str, override: Any) -> list[str]:
     if env:
         return _dedupe_providers(_split_list(env))
     if _is_cjk(query):
-        return ["duckduckgo", "sogou", "so360", "bing_html", "bing_rss"]
-    return ["duckduckgo", "bing_rss", "bing_html"]
+        return ["bing_rss", "bing_html", "sogou", "so360", "duckduckgo"]
+    return ["bing_rss", "duckduckgo", "bing_html"]
 
 
 def _active_provider_order(query: str, override: Any, notes: list[str], ignore_failure_limit: bool = False) -> list[str]:
@@ -1710,6 +1710,21 @@ def _parse_feed_entries(text: str, count: int) -> list[dict[str, str]]:
     return rows
 
 
+def _fetch_diagnostics(text: str, output: str, status: int, content_type: str, is_html: bool) -> list[str]:
+    haystack = _normalize_space((text[:12000] or "") + " " + (output[:4000] or "")).lower()
+    signals: list[str] = []
+    if status and status >= 400:
+        signals.append(f"HTTP {status}: server returned an error/blocked status; fetched text may be an error page, not the target content.")
+    if re.search(r"captcha|verify you are human|checking if the site connection is secure|cloudflare|access denied|forbidden|security check|unusual traffic|enable javascript|enable cookies|request blocked|akamai|perimeterx|datadome", haystack, flags=re.I):
+        signals.append("Possible anti-bot, captcha, or security-check page detected; use browser automation or authenticated/API access if this page requires it.")
+    if re.search(r"[验驗]证[码碼]|人机[验驗]证|安全[验驗]证|访问受限|訪問受限|请求被拦截|請開啟|请开启|启用 javascript|啟用 javascript|登录后查看|登入後查看", haystack, flags=re.I):
+        signals.append("Possible Chinese anti-bot/login/security page detected; this is probably not the article/body content.")
+    if is_html and len(output.strip()) < 160 and re.search(r"<script\b", text, flags=re.I) and not re.search(r"<p\b|<article\b|<main\b", text, flags=re.I):
+        signals.append("The page looks like a JavaScript-rendered shell with little extractable text; use a browser automation MCP for rendered content.")
+    if re.search(r"anthropic|terms of service|acceptable use|safety policy", haystack, flags=re.I) and len(output.strip()) < 600:
+        signals.append("The extracted text looks like a policy/refusal/interstitial page rather than normal site content; check status/final URL or fetch with extract=raw.")
+    return list(dict.fromkeys(signals))
+
 def _format_feed(entries: list[dict[str, str]], source_url: str, count: int) -> str:
     if not entries:
         return f"No RSS/Atom entries found for {source_url}."
@@ -1777,6 +1792,10 @@ def _format_fetched_content(final_url: str, content_type: str, body: bytes, rout
         lines.append("Format: raw")
     if title:
         lines.append(f"Title: {title}")
+    diagnostics = _fetch_diagnostics(text, output, status, content_type, is_html)
+    if diagnostics:
+        lines.append("Fetch diagnostics:")
+        lines.extend("- " + item for item in diagnostics)
     full_output = output or "(No extractable text.)"
     start = min(offset, len(full_output))
     end = min(start + max_chars, len(full_output))

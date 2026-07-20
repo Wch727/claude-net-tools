@@ -7,7 +7,7 @@
     "claude-code-net-tools": "./claude_net_mcp.mjs"
   },
   "scripts": {
-    "check": "node --check claude_net_mcp.mjs && python -m py_compile claude_net_mcp.py",
+    "check": "node --check claude_net_mcp.mjs && (py -3 -m py_compile claude_net_mcp.py || python3 -m py_compile claude_net_mcp.py || python -m py_compile claude_net_mcp.py)",
     "test": "npm run check && node tests/mcp-regression.mjs",
     "start": "node claude_net_mcp.mjs"
   },
