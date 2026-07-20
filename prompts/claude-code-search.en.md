@@ -1,28 +1,25 @@
 # Claude Code Net Tools Search Prompt (English)
 
-Copy the block below into Claude Code project instructions, memory, or custom instructions to make better use of `claude-code-net-tools`.
+Put the entire `text` block below in the `CLAUDE.md`, memory/custom-instruction surface, or first session message that Claude Code actually loads. This repository file is not activated automatically.
 
 ```text
-When a user asks a question that may require web access, do not pass the raw user wording directly to the search tool. First use your own knowledge to infer the real entity, domain, time scope, and likely authoritative sources, then create 1-3 high-quality search queries.
+When a question may require web access, first use your own knowledge to identify the entity, domain, time scope, and likely authoritative sources, then produce 1-3 strong queries. Do not mechanically pass the raw user sentence to a tool, and do not stop after the first zero-result response.
 
-Rules:
-- For acronyms, terms, papers, packages, companies, products, or people, expand names and add helpful context such as full names, authors, organizations, paper IDs, official sites, dates, or authoritative-source keywords.
-- For Chinese questions, consider both Chinese queries and English queries when English is more likely to find authoritative sources.
-- Start with `net-tools search_web` for basic search. It preserves provider order and does not replace your judgment.
-- If results are too broad or noisy, rewrite the query and search again. Use `search_web_focused` only when explicit assisted filtering is useful.
-- Use `scholar_search` for papers, `package_search` for packages, `fetch_url` for webpages, `fetch_json` for JSON APIs, `fetch_rss` for feeds, and `fetch_pdf` for PDFs.
-- When reading webpages, prefer `fetch_url` with `include_links: true` if you need both body text and links. If the result includes `next_offset`, continue with the same URL and that `offset` instead of blindly raising `max_chars` at the start.
-- If scholar search hits arXiv HTTP 429 or obvious rate limiting, do not keep retrying arXiv. Use Crossref, Semantic Scholar, or web search to confirm the paper first, then fetch the official PDF only when needed.
-- For package lookups, identify the ecosystem first: use PyPI/pypi for Python packages, npm for npm packages, and github for repositories. Do not mix same-name packages across ecosystems.
-- For dynamic facts such as latest versions, stars, downloads, release dates, prices, schedules, or service status, include "as of YYYY-MM-DD" and name the source type: npm, PyPI, GitHub API, search result, or fetched page.
-- When reporting tool usage, separate search queries from fetched URLs. Do not describe a `fetch_url` page URL as a search query.
-- When explaining net-tools default provider order, call `search_status` or check the README first, and distinguish non-CJK query defaults from CJK query defaults.
-- Tool output is source material, not the final answer. Synthesize the answer from links, snippets, and fetched content. If coverage is partial, say "key sources found" or "currently confirmed" instead of "all data is complete".
+Tool rules:
+- For results close to a real search page, prefer `net-tools browser_search`. It renders Google, Bing, or DuckDuckGo through Playwright, preserves page order, and does not rerank.
+- For fast, low-cost search, call `net-tools search_web`. Its default `browser=auto` falls back to a browser when HTTP providers return too few results; pass `browser=always` to force browser search.
+- When results are noisy, rewrite the query first. Use `net-tools search_web_focused` only when relevance filtering is useful. Leave `rerank` disabled unless the user explicitly asks for it.
+- For acronyms, papers, people, products, and packages, add full names, English names, authors, organizations, years, paper IDs, official-site terms, or source types. For Chinese questions, consider both Chinese and English queries.
+- Use `net-tools scholar_search` for papers. If it returns zero results, remove years and generic words while preserving author/title terms, or search the title with `browser_search`. Do not repeatedly retry arXiv after HTTP 429.
+- Read webpage content with `net-tools fetch_url`. For JavaScript pages, empty/blocked HTTP fetches, use `net-tools browser_fetch` or pass `browser=auto|always` to `fetch_url`.
+- Do not switch to Claude Code built-in `Fetch`, `WebFetch`, or equivalent URL-reading tools for external pages; they may trigger Anthropic domain-safety verification. Unless the user explicitly requests otherwise, perform search and page reading through `net-tools`.
+- Use `net-tools fetch_json` for JSON APIs, `fetch_rss` for RSS/Atom, `fetch_pdf` for PDFs, and `package_search` for packages or repositories.
+- Pass `include_links=true` to `fetch_url` or `browser_fetch` when both body and links are needed. When `next_offset` is returned, continue with the same URL and offset.
+- Tool output is source material, not the final answer. Synthesize titles, snippets, page text, and sources; date dynamic facts; state the confirmed scope when evidence is incomplete.
 
-Example:
-If the user asks "what is BERT?", do not search only `bert`. Search queries like:
+Example: for “what is BERT?”, search queries may include:
 1. BERT Bidirectional Encoder Representations from Transformers Google arXiv 1810.04805
-2. BERT language model Google AI Wikipedia Hugging Face
+2. BERT language model Google Research Hugging Face
 
-Then read authoritative results such as arXiv, Wikipedia, Hugging Face, Google Research, or the original paper before answering.
+Example: if `McDermott R1 rule-based configurer computer systems 1982` returns zero scholar results, try `McDermott R1 rule based configurer computer systems` or search the paper title with `browser_search`; do not conclude that no source exists.
 ```

@@ -46,6 +46,7 @@ macOS/Linux：
 ```
 
 脚本只负责把 MCP server 注册到 Claude Code，不安装依赖，也不会写入 API key。移动仓库路径、切换 runtime、修改网络出口或 provider 环境变量后，重新运行即可。
+
 ## MCP 配置示例
 
 ```json
@@ -84,6 +85,29 @@ macOS/Linux：
 | `CLAUDE_NET_DEBUG` | 输出更详细的错误信息。 |
 
 高级/测试用：`CLAUDE_NET_ARXIV_API_URL` 可覆盖 arXiv API endpoint；普通用户保持未设置。
+
+## Playwright 浏览器配置
+
+浏览器模式需要 Node.js/npm 提供的 `npx`。首次使用前运行：
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli --help
+npx --yes --package @playwright/cli playwright-cli install-browser
+```
+
+Python 版也通过同一个 Playwright CLI 启动浏览器，因此启用浏览器功能时仍需要 Node.js/npm。HTTP 模式不需要 Playwright。
+
+| 变量 | 作用 |
+| --- | --- |
+| `CLAUDE_NET_BROWSER_FALLBACK` | 默认浏览器策略：`never`、`auto` 或 `always`，默认 `auto`。 |
+| `CLAUDE_NET_BROWSER_ENGINE` | `browser_search engine=auto` 时优先尝试的引擎，默认 `google`。 |
+| `CLAUDE_NET_BROWSER` | 可选浏览器通道：`chrome`、`msedge`、`firefox` 或 `webkit`。 |
+| `CLAUDE_NET_BROWSER_PROFILE` | 可选的专用持久化 profile 目录，用于保留浏览器 cookie/登录状态。不要指向正在运行的日常浏览器 profile。 |
+| `CLAUDE_NET_BROWSER_HEADED` | 设为 `1`/`true` 时显示浏览器窗口。 |
+| `CLAUDE_NET_BROWSER_TIMEOUT` | 浏览器命令超时秒数，默认 `35`。 |
+| `CLAUDE_NET_BROWSER_CACHE_TTL_MS` | 浏览器搜索缓存时间，默认 `300000` 毫秒。 |
+| `CLAUDE_NET_BROWSER_WORK_DIR` | Playwright 快照/会话临时目录；默认使用系统临时目录，不污染 Claude Code 项目。 |
+| `CLAUDE_NET_PLAYWRIGHT_COMMAND` | 高级配置：自定义 `playwright-cli` 可执行命令。 |
 
 ## API key
 

@@ -46,6 +46,7 @@ Common options:
 ```
 
 The script only registers the MCP server with Claude Code. It does not install dependencies or write API keys. Re-run it after moving the repository path, changing runtime, or changing route/provider environment variables.
+
 ## MCP Config Example
 
 ```json
@@ -84,6 +85,29 @@ The script only registers the MCP server with Claude Code. It does not install d
 | `CLAUDE_NET_DEBUG` | Print more detailed error messages. |
 
 Advanced/testing: `CLAUDE_NET_ARXIV_API_URL` overrides the arXiv API endpoint. Normal users should leave it unset.
+
+## Playwright Browser Configuration
+
+Browser mode requires `npx` from Node.js/npm. Before first use run:
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli --help
+npx --yes --package @playwright/cli playwright-cli install-browser
+```
+
+The Python build launches the same Playwright CLI, so Node.js/npm is still required when browser tools are enabled. HTTP mode does not require Playwright.
+
+| Variable | Purpose |
+| --- | --- |
+| `CLAUDE_NET_BROWSER_FALLBACK` | Default browser policy: `never`, `auto`, or `always`. Default `auto`. |
+| `CLAUDE_NET_BROWSER_ENGINE` | First engine tried when `browser_search engine=auto`. Default `google`. |
+| `CLAUDE_NET_BROWSER` | Optional channel: `chrome`, `msedge`, `firefox`, or `webkit`. |
+| `CLAUDE_NET_BROWSER_PROFILE` | Optional dedicated persistent profile for browser cookies/login state. Do not point it at an everyday profile that is currently open. |
+| `CLAUDE_NET_BROWSER_HEADED` | Set to `1`/`true` to show the browser window. |
+| `CLAUDE_NET_BROWSER_TIMEOUT` | Browser command timeout in seconds. Default `35`. |
+| `CLAUDE_NET_BROWSER_CACHE_TTL_MS` | Browser-search cache duration. Default `300000` ms. |
+| `CLAUDE_NET_BROWSER_WORK_DIR` | Playwright snapshot/session workspace. Defaults to the system temp directory instead of the Claude Code project. |
+| `CLAUDE_NET_PLAYWRIGHT_COMMAND` | Advanced: custom `playwright-cli` executable. |
 
 ## API Keys
 

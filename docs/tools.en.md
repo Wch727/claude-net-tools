@@ -61,6 +61,13 @@ Rules:
 
 `fetch_pdf` relies on local `pdftotext`. It is useful for abstracts, introductions, conclusions, and bibliographic information. For formulas, tables, captions, and complex scientific layouts, plain text may be out of order. For those documents, first use `fetch_pdf extractor=none` to verify download, then read the PDF locally or with browser/OCR support.
 
-## Browser Boundary
+## Browser Mode And Boundaries
 
-This tool is not a full browser. It does not execute JavaScript, keep browser login sessions, or solve captchas. For dynamic or login-only pages, pair it with a browser automation MCP such as Playwright/Chromium. It also does not bypass Claude Code model-side safety decisions; fetch diagnostics only identify anti-bot, captcha, login, JavaScript shell, or policy/interstitial pages so they are not mistaken for article content.
+- `browser_status`: shows the Playwright command, default engine, cache, and profile; `live=true` opens a real page for diagnosis.
+- `browser_search`: opens a real Google, Bing, or DuckDuckGo results page, executes JavaScript, and extracts titles, links, and snippets in page order without reranking.
+- `browser_fetch`: opens a target URL and returns rendered body text and links with `max_chars`, `offset`, and `next_offset` paging.
+- `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`. `auto` falls back only for insufficient results, HTTP failure, anti-bot pages, or JavaScript-only shells.
+
+The browser session is reused for the MCP process lifetime. Set `CLAUDE_NET_BROWSER_PROFILE` to a dedicated persistent profile for browser cookies and login state. It is separate from the HTTP cookie jar managed by `session_create`.
+
+Playwright executes JavaScript, but it does not automatically solve captchas, bypass login/authorization, evade site rules, or bypass Claude Code model-side safety decisions. Claude Code built-in `Fetch` errors such as “Unable to verify if domain is safe to fetch” do not come from this project; instruct Claude Code to use `net-tools fetch_url` or `net-tools browser_fetch` to avoid switching to that separate domain-verification path.

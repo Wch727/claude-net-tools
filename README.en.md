@@ -54,6 +54,19 @@ If you do not need a proxy, leave `CLAUDE_NET_PROXY` unset or set it to `direct`
 - `session_create` / `session_status` / `session_clear`: named HTTP sessions with default headers/cookies/referer and a dedicated cookie jar.
 - `proxy_status` / `search_status` / `pdf_status`: focused diagnostics for routes, provider status, and PDF extraction.
 
+## Browser Search (Optional)
+
+`browser_search` and `browser_fetch` use local Playwright to open real search pages and read JavaScript-rendered content. `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`; the default `auto` falls back only when HTTP search returns too few results or a page is blocked/JavaScript-only.
+
+Check and install browser support before first use:
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli --help
+npx --yes --package @playwright/cli playwright-cli install-browser
+```
+
+Browser support is optional. Existing HTTP search, fetch, API, and PDF tools continue to work without it. Run `browser_status live=true` for a real browser diagnostic.
+
 ## Documentation
 
 - [Configuration and API keys](docs/config.en.md)

@@ -19,6 +19,17 @@ Use net-tools search_web to search "Attention Is All You Need arXiv PDF" count 5
 
 A good run does not require every provider to succeed. It should show the active route, have at least one working search provider, return body text/status/`next_offset` where applicable from `fetch_url`, avoid repeated arXiv requests after HTTP 429, and provide clear diagnostics if local `pdftotext` is unavailable.
 
+## Browser Smoke Prompts
+
+```text
+Use net-tools browser_status with live=true.
+Use net-tools browser_search to search "Rosenblatt XOR problem Principles of Neurodynamics 1962" count 3, preserving browser order.
+Use net-tools scholar_search to search "McDermott R1 rule-based configurer computer systems 1982" count 3 with provider semantic_scholar; if empty, report the relaxed query attempt.
+Use net-tools browser_fetch to read https://en.wikipedia.org/wiki/Frank_Rosenblatt with include_links true. Do not use Claude Code built-in Fetch.
+```
+
+The last prompt must show a `net-tools browser_fetch` or `net-tools fetch_url` call. If Claude Code switches to built-in `Fetch` and reports “Unable to verify if domain is safe to fetch,” that is a separate tool's domain verification, not a net-tools fetch failure.
+
 ## Session Smoke Prompts
 
 ```text

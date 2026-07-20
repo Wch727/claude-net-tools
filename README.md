@@ -54,6 +54,19 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 - `session_create` / `session_status` / `session_clear`：命名 HTTP session，保存默认 headers/cookies/referer，并复用独立 cookie jar。
 - `proxy_status` / `search_status` / `pdf_status`：分项诊断网络出口、provider 状态和 PDF 提取工具。
 
+## 浏览器搜索（可选）
+
+`browser_search` 和 `browser_fetch` 通过本机 Playwright 打开真实搜索页并读取 JavaScript 渲染后的内容。`search_web`、`search_web_focused` 和 `fetch_url` 支持 `browser=never|auto|always`；默认 `auto` 只在普通 HTTP 搜索结果不足或网页被拦截/只有 JS 空壳时回退。
+
+首次使用浏览器功能前检查并安装：
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli --help
+npx --yes --package @playwright/cli playwright-cli install-browser
+```
+
+浏览器功能是可选的；不安装时原有 HTTP 搜索、抓取、API 和 PDF 工具仍可使用。用 `browser_status live=true` 做真实浏览器诊断。
+
 ## 文档
 
 - [配置和 API key](docs/config.zh.md)

@@ -19,6 +19,17 @@ Use net-tools search_web to search "Attention Is All You Need arXiv PDF" count 5
 
 好的结果不要求所有 provider 都成功，但应满足：能显示当前 route；至少一个搜索 provider 可用；`fetch_url` 能返回正文、状态码和必要时的 `next_offset`；`scholar_search` 不应因 arXiv 429 一直连发请求；PDF 如果本机 `pdftotext` 不可用，应给出明确诊断。
 
+## 浏览器烟测题
+
+```text
+Use net-tools browser_status with live=true.
+Use net-tools browser_search to search "Rosenblatt XOR problem Principles of Neurodynamics 1962" count 3, preserving browser order.
+Use net-tools scholar_search to search "McDermott R1 rule-based configurer computer systems 1982" count 3 with provider semantic_scholar; if empty, report the relaxed query attempt.
+Use net-tools browser_fetch to read https://en.wikipedia.org/wiki/Frank_Rosenblatt with include_links true. Do not use Claude Code built-in Fetch.
+```
+
+这里最后一条必须显示调用的是 `net-tools browser_fetch` 或 `net-tools fetch_url`。如果 Claude Code 改用内置 `Fetch`，出现“Unable to verify if domain is safe to fetch”属于另一套工具的域名校验，不是 net-tools 抓取失败。
+
 ## Session 烟测题
 
 ```text

@@ -61,6 +61,13 @@
 
 `fetch_pdf` 依赖本机 `pdftotext`。它适合快速读摘要、引言、结论和参考信息；对公式、表格、图片说明、复杂版式论文，纯文本结果可能乱序。遇到这类文档，建议先用 `fetch_pdf extractor=none` 验证下载，再用本机 PDF 阅读器或后续浏览器/OCR 能力处理。
 
-## 浏览器边界
+## 浏览器模式与边界
 
-这个工具不是完整浏览器。它不执行 JavaScript、不保留浏览器登录态、不处理验证码。动态页面、需要登录的网站，建议配合浏览器自动化 MCP（例如 Playwright/Chromium）使用。它也不绕过 Claude Code 模型侧的安全策略；新增的 fetch diagnostics 只用于识别反爬、验证码、登录页、JS 壳或策略提示页，避免把这些页面误当正文。
+- `browser_status`：显示 Playwright 命令、默认引擎、缓存、profile，并可用 `live=true` 打开真实网页诊断。
+- `browser_search`：打开 Google、Bing 或 DuckDuckGo 的真实搜索页，执行 JavaScript 后按页面原顺序提取标题、链接和摘要，不打分重排。
+- `browser_fetch`：打开目标 URL，读取渲染后的正文和链接，支持 `max_chars`、`offset` 和 `next_offset` 分段读取。
+- `search_web`、`search_web_focused`、`fetch_url` 的 `browser` 参数支持 `never|auto|always`。`auto` 只在结果不足、HTTP 失败、反爬页或 JavaScript 空壳时回退。
+
+浏览器 session 在 MCP 进程内复用。设置 `CLAUDE_NET_BROWSER_PROFILE` 可使用专用持久化 profile 保存浏览器 cookie 和登录状态；它与 `session_create` 的 HTTP cookie jar 相互独立。
+
+Playwright 能执行 JavaScript，但不会自动破解验证码、绕过登录/授权或规避网站规则，也不会绕过 Claude Code 模型侧安全决策。Claude Code 内置 `Fetch` 的“Unable to verify if domain is safe to fetch”不来自本项目；要避免走那套域名校验，应在提示词中要求使用 `net-tools fetch_url` 或 `net-tools browser_fetch`。

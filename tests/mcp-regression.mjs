@@ -107,6 +107,9 @@ function cleanEnv(baseUrl, runtime) {
     "CLAUDE_NET_SEARCH_PROVIDERS", "CLAUDE_NET_SCHOLAR_PROVIDERS", "CLAUDE_NET_DISABLED_PROVIDERS",
   ]) env[key] = "";
   env.CLAUDE_NET_PROXY = "direct";
+  env.CLAUDE_NET_BROWSER_FALLBACK = "never";
+  env.CLAUDE_NET_PLAYWRIGHT_COMMAND = process.execPath;
+  env.CLAUDE_NET_PLAYWRIGHT_ARGS = JSON.stringify([path.join(root, "tests", "playwright-cli-mock.mjs")]);
   env.CLAUDE_NET_ARXIV_API_URL = `${baseUrl}/arxiv`;
   env.CLAUDE_NET_ARXIV_COOLDOWN_MS = "60000";
   env.CLAUDE_NET_COOKIE_DIR = path.join(os.tmpdir(), `claude-net-tools-test-${process.pid}-${runtime}`, "cookies");
@@ -140,7 +143,7 @@ async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
     await client.initialize();
     const tools = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
-    for (const required of ["net_doctor", "proxy_status", "search_status", "session_create", "session_status", "session_clear", "search_web", "scholar_search", "fetch_url", "extract_links", "fetch_json", "fetch_rss", "fetch_pdf"]) {
+    for (const required of ["net_doctor", "proxy_status", "search_status", "session_create", "session_status", "session_clear", "browser_status", "browser_search", "browser_fetch", "search_web", "scholar_search", "fetch_url", "extract_links", "fetch_json", "fetch_rss", "fetch_pdf"]) {
       assert.ok(names.includes(required), `${label} missing tool ${required}`);
     }
 
@@ -156,6 +159,21 @@ async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
     assertIncludes(status, "missing env:", `${label} search_status`);
     assertIncludes(status, "unknown provider", `${label} search_status`);
     assertIncludes(status, "include_paid=true", `${label} search_status`);
+
+    const browserHealth = await client.callTool("browser_status", { live: true });
+    assertIncludes(browserHealth, "Live check: ok", label + " browser_status");
+    assertIncludes(browserHealth, "Example Domain", label + " browser_status");
+
+    const browserResults = await client.callTool("browser_search", { query: "Rosenblatt XOR Principles of Neurodynamics 1962", count: 3 });
+    assertIncludes(browserResults, "Principles of Neurodynamics", label + " browser_search");
+    assertIncludes(browserResults, "Provider: browser:google", label + " browser_search");
+
+    const focusedBrowser = await client.callTool("search_web_focused", { query: "Rosenblatt XOR problem Principles of Neurodynamics 1962", count: 3, browser: "always" });
+    assertIncludes(focusedBrowser, "Principles of Neurodynamics", label + " focused browser relevance");
+
+    const rendered = await client.callTool("browser_fetch", { url: "https://example.test/app", include_links: true });
+    assertIncludes(rendered, "Rendered fixture body from Playwright", label + " browser_fetch");
+    assertIncludes(rendered, "https://example.test/next", label + " browser_fetch links");
 
     const page = await client.callTool("fetch_url", { url: `${baseUrl}/page`, extract: "readable", max_chars: 500, include_links: true, link_limit: 5 });
     assertIncludes(page, "Status: 200", `${label} fetch_url`);
@@ -173,6 +191,10 @@ async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
     const blocked = await client.callTool("fetch_url", { url: `${baseUrl}/blocked`, extract: "readable", max_chars: 800 });
     assertIncludes(blocked, "Fetch diagnostics:", `${label} blocked diagnostics`);
     assertIncludes(blocked, "Possible anti-bot", `${label} blocked diagnostics`);
+
+    const blockedWithBrowser = await client.callTool("fetch_url", { url: baseUrl + "/blocked", extract: "readable", max_chars: 800, browser: "auto" });
+    assertIncludes(blockedWithBrowser, "Rendered fixture body from Playwright", label + " fetch browser fallback");
+    assertIncludes(blockedWithBrowser, "Browser fallback reason:", label + " fetch browser fallback");
 
     const linksPage = await client.callTool("fetch_url", { url: `${baseUrl}/links`, extract: "readable", include_links: true, link_limit: 5 });
     assertIncludes(linksPage, "https://example.com/target", `${label} ddg relative redirect link`);
