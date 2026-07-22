@@ -2,6 +2,7 @@
 set -euo pipefail
 
 NAME="net-tools"
+SCOPE="local"
 RUNTIME="auto"
 PROXY=""
 PROVIDERS=""
@@ -10,6 +11,7 @@ FORCE="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
+    --scope) SCOPE="$2"; shift 2 ;;
     --runtime) RUNTIME="$2"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
     --providers) PROVIDERS="$2"; shift 2 ;;
@@ -17,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE="1"; shift ;;
     -h|--help)
       cat <<'HELP'
-Usage: scripts/install-claude-code.sh [--name net-tools] [--runtime auto|node|python] [--proxy URL|direct] [--providers LIST] [--force]
+Usage: scripts/install-claude-code.sh [--name net-tools] [--scope local|user|project] [--runtime auto|node|python] [--proxy URL|direct] [--providers LIST] [--force]
 
 Examples:
   scripts/install-claude-code.sh
@@ -29,6 +31,8 @@ HELP
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$SCOPE" in local|user|project) ;; *) echo "--scope must be local, user, or project" >&2; exit 2 ;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -45,7 +49,7 @@ if [[ "$RUNTIME" == "auto" ]]; then
   fi
 fi
 
-args=(mcp add "$NAME")
+args=(mcp add --scope "$SCOPE" "$NAME")
 if [[ -n "$PROXY" ]]; then
   args+=(-e "CLAUDE_NET_PROXY=$PROXY")
 fi
@@ -73,12 +77,12 @@ fi
 
 if [[ "$FORCE" == "1" ]]; then
   echo "Removing existing Claude Code MCP server '$NAME' if present..."
-  claude mcp remove "$NAME" >/dev/null 2>&1 || true
+  claude mcp remove "$NAME" -s "$SCOPE" >/dev/null 2>&1 || true
 fi
 
 args+=("$cmd" "$entry")
 
-echo "Installing Claude Code MCP server '$NAME' with $RUNTIME runtime..."
+echo "Installing Claude Code MCP server '$NAME' in $SCOPE scope with $RUNTIME runtime..."
 printf 'claude'; printf ' %q' "${args[@]}"; printf '\n'
 claude "${args[@]}"
 

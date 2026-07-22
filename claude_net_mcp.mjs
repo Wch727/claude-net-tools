@@ -9,7 +9,7 @@ import { promisify, TextDecoder } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SERVER_NAME = "claude-code-net-tools";
-const SERVER_VERSION = "0.8.0";
+const SERVER_VERSION = "0.8.1";
 const DEFAULT_LOCAL_PROXY_PORTS = [7890, 7897, 7899, 10809, 10808, 1080, 8080, 20171, 2080];
 const DEFAULT_FETCH_MAX_CHARS = Math.max(500, Math.min(Number(process.env.CLAUDE_NET_DEFAULT_MAX_CHARS) || 12000, 200000));
 const MAX_OUTPUT_CHARS = Math.max(1000, Math.min(Number(process.env.CLAUDE_NET_MAX_OUTPUT_CHARS) || 200000, 1000000));
@@ -141,7 +141,7 @@ const TOOLS = [
   },
   {
     name: "browser_fetch",
-    description: "Open a URL in Playwright and return rendered text and links. Use for JavaScript pages or HTTP fetch failures.",
+    description: "Claude Code browser fallback: open a URL in Playwright and return rendered text and links. Use for JavaScript pages or HTTP fetch failures instead of built-in Fetch/WebFetch.",
     inputSchema: {
       type: "object",
       properties: {
@@ -159,7 +159,7 @@ const TOOLS = [
   },
   {
     name: "search_web",
-    description: "Default web search. Executes the exact query, preserves provider order, and does not expand, filter, rerank, or resolve redirects.",
+    description: "Primary Claude Code web search. Executes the exact query, queries multiple provider families when available, and round-robin merges them in configured order without relevance sorting, filtering, query expansion, or redirect probing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -187,7 +187,7 @@ const TOOLS = [
         browser: { type: "string", enum: ["never", "auto", "always"], default: DEFAULT_BROWSER_MODE },
         browser_engine: { type: "string", enum: ["auto", "google", "bing", "duckduckgo"], default: "auto" },
         expand_query: { type: "boolean", default: true, description: "For CJK questions, also try a cleaned core query." },
-        strict_relevance: { type: "boolean", default: true, description: "Drop results with weak keyword coverage while preserving provider order." },
+        strict_relevance: { type: "boolean", default: false, description: "Opt in to dropping results with weak keyword coverage while preserving provider order." },
         rerank: { type: "boolean", default: false, description: "When true, apply heuristic result re-ranking." },
         resolve_redirects: { type: "boolean", default: false, description: "Resolve known search-engine redirect URLs to their final target URLs." },
         allowed_domains: { type: "array", items: { type: "string" } },
@@ -228,7 +228,7 @@ const TOOLS = [
   },
   {
     name: "fetch_url",
-    description: "Fetch one URL and return content. Supports offset paging for long text and optional link extraction in the same call.",
+    description: "Primary Claude Code URL reader; use instead of built-in Fetch/WebFetch. Returns content with offset paging for long text and optional link extraction in the same call, with Playwright fallback when requested.",
     inputSchema: {
       type: "object",
       properties: {
@@ -807,7 +807,10 @@ async function runPlaywright(args, { parseResult = false, timeout = BROWSER_TIME
     return parseResult ? parsePlaywrightOutput(stdout) : String(stdout || "");
   } catch (error) {
     const detail = [error.message, error.stderr, error.stdout].filter(Boolean).join(" | ").slice(0, 1200);
-    throw new Error("Playwright CLI failed: " + detail + ". Install it with: npx --yes --package @playwright/cli playwright-cli install-browser");
+    const installHint = /ENOENT|not found|not recognized|cannot find|missing executable|browser.*not installed/i.test(detail)
+      ? ". Install it with: npx --yes --package @playwright/cli playwright-cli install-browser"
+      : "";
+    throw new Error("Playwright CLI failed: " + detail + installHint);
   }
 }
 
@@ -843,7 +846,33 @@ async function browserNavigate(url) {
 }
 
 async function browserEvaluate(source) {
-  return runPlaywright(["-s=" + BROWSER_SESSION, "eval", source], { parseResult: true });
+  await fs.mkdir(BROWSER_WORK_DIR, { recursive: true });
+  const scriptPath = path.join(BROWSER_WORK_DIR, "evaluate-" + process.pid + "-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".js");
+  const runCode = "async page => await page.evaluate(" + source + ")";
+  try {
+    await fs.writeFile(scriptPath, runCode, "utf8");
+    return await runPlaywright(["-s=" + BROWSER_SESSION, "run-code", "--filename=" + scriptPath], { parseResult: true });
+  } catch (error) {
+    throw new Error((error.message || String(error)) + " | Eval source: " + source.slice(0, 700).replace(/\s+/g, " "));
+  } finally {
+    await fs.rm(scriptPath, { force: true }).catch(() => {});
+  }
+}
+
+function browserFunctionSource(fn, bindings = {}) {
+  const text = fn.toString();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("Could not serialize browser evaluation function");
+  const declarations = Object.entries(bindings).map(([name, value]) => {
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) throw new Error("Invalid browser binding: " + name);
+    return "const " + name + " = " + JSON.stringify(value) + ";";
+  }).join("\n");
+  return "() => {\n" + declarations + "\n" + text.slice(start + 1, end).trim() + "\n}";
+}
+
+function globalBrowserFailure(error) {
+  return /SyntaxError|spawn |ENOENT|not found|not recognized|cannot find|missing executable|browser.*not installed/i.test(String(error?.message || error));
 }
 
 function browserSearchPageData(limit) {
@@ -968,7 +997,7 @@ async function browserSearchRows(query, count, engineValue = "auto", refresh = f
   for (const engine of engines) {
     try {
       await browserNavigate(browserSearchUrl(engine, query, count));
-      const source = "(" + browserSearchPageData.toString() + ")(" + JSON.stringify(count) + ")";
+      const source = browserFunctionSource(browserSearchPageData, { limit: count });
       const data = await browserEvaluate(source);
       const rows = (data?.rows || []).map((row) => result(row.title, cleanUrl(row.url), row.snippet || "", "browser:" + engine));
       if (data?.blocked) notes.push(engine + ": possible captcha/security page");
@@ -980,6 +1009,7 @@ async function browserSearchRows(query, count, engineValue = "auto", refresh = f
       }
     } catch (error) {
       notes.push(engine + ": " + error.message);
+      if (globalBrowserFailure(error)) break;
     }
   }
   return { rows: [], notes, engine: "" };
@@ -1003,7 +1033,7 @@ async function browserFetch(args = {}) {
   const extract = ["readable", "text", "html"].includes(String(args?.extract || "").toLowerCase()) ? String(args.extract).toLowerCase() : "readable";
   await browserNavigate(url);
   const options = { maxChars, offset, includeLinks, linkLimit, sameDomain: Boolean(args?.same_domain_links), extract };
-  const source = "(" + browserFetchPageData.toString() + ")(" + JSON.stringify(options) + ")";
+  const source = browserFunctionSource(browserFetchPageData, { options });
   const data = await browserEvaluate(source);
   const lines = [
     "URL: " + data.finalUrl,
@@ -1206,6 +1236,47 @@ function dedupe(rows) {
     out.push(row);
   }
   return out;
+}
+
+function providerFamily(provider) {
+  const name = normalizeProviderName(provider);
+  if (name.startsWith("bing_")) return "bing";
+  if (name.startsWith("browser")) return "browser";
+  return name;
+}
+
+function addResultBatch(batches, provider, rows) {
+  const existingUrls = new Set(
+    batches.flatMap((batch) => batch.rows).map((row) => row.url.replace(/#.*$/, "")),
+  );
+  const unique = dedupe(rows).filter((row) => !existingUrls.has(row.url.replace(/#.*$/, "")));
+  if (!unique.length) return 0;
+  const current = batches.find((batch) => batch.provider === provider);
+  if (current) current.rows.push(...unique);
+  else batches.push({ provider, rows: unique });
+  return unique.length;
+}
+
+function interleaveResultBatches(batches, limit = Number.POSITIVE_INFINITY) {
+  const rows = [];
+  const seen = new Set();
+  const maxLength = Math.max(0, ...batches.map((batch) => batch.rows.length));
+  for (let index = 0; index < maxLength && rows.length < limit; index += 1) {
+    for (const batch of batches) {
+      const row = batch.rows[index];
+      if (!row || !row.url) continue;
+      const key = row.url.replace(/#.*$/, "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+      if (rows.length >= limit) break;
+    }
+  }
+  return rows;
+}
+
+function usefulProviderFamilyCount(batches) {
+  return new Set(batches.filter((batch) => batch.rows.length).map((batch) => providerFamily(batch.provider))).size;
 }
 
 function rankRows(rows, query) {
@@ -1897,27 +1968,38 @@ async function searchWeb(args) {
   const browserMode = normalizeBrowserMode(args?.browser);
   const notes = ["mode: basic (provider order preserved; no query expansion, filtering, reranking, or redirect probing)", "browser: " + browserMode];
   let rows = [];
+  const batches = [];
   if (browserMode === "always") {
     const searched = await browserSearchRows(query, count, args?.browser_engine || "auto", false);
     notes.push(...searched.notes);
     rows = searched.rows;
   } else {
     const providers = activeProviderOrder(query, args?.providers, notes);
+    const expectedFamilies = Math.min(2, new Set(providers.map(providerFamily)).size);
     for (const provider of providers) {
-      if (rows.length >= count) break;
       try {
-        const raw = await runProviderTracked(provider, query, Math.max(1, count - rows.length));
+        const raw = await runProviderTracked(provider, query, count);
+        const added = addResultBatch(batches, provider, raw);
         notes.push(provider + ": " + raw.length + " result(s) for " + JSON.stringify(query));
-        rows = dedupe(rows.concat(raw));
+        if (raw.length && !added) notes.push(provider + ": results duplicated earlier providers");
+        const preview = interleaveResultBatches(batches, count);
+        if (preview.length >= count && usefulProviderFamilyCount(batches) >= expectedFamilies) break;
       } catch (error) {
         notes.push(provider + ": " + error.message);
       }
     }
-    if (browserMode === "auto" && rows.length < count) {
+    rows = interleaveResultBatches(batches);
+    const insufficientFamilies = usefulProviderFamilyCount(batches) < expectedFamilies;
+    if (browserMode === "auto" && (rows.length < count || insufficientFamilies)) {
       const searched = await browserSearchRows(query, count, args?.browser_engine || "auto", false);
-      notes.push("browser fallback: HTTP providers returned only " + rows.length + " result(s)", ...searched.notes);
-      rows = dedupe(rows.concat(searched.rows));
+      const reason = rows.length < count
+        ? "HTTP providers returned only " + rows.length + " distinct result(s)"
+        : "HTTP providers returned results from too few independent source families";
+      notes.push("browser fallback: " + reason, ...searched.notes);
+      addResultBatch(batches, "browser", searched.rows);
+      rows = interleaveResultBatches(batches);
     }
+    if (batches.length > 1) notes.push("provider merge: round-robin in configured order; no relevance sorting");
   }
   rows = filterDomains(dedupe(rows), args?.allowed_domains || [], args?.blocked_domains || []).slice(0, count);
   if (!rows.length) return ["No search results for " + JSON.stringify(query) + ".", "", "Provider notes:", ...notes.map((x) => "- " + x)].join("\n");
@@ -1929,7 +2011,7 @@ async function searchWebFocused(args) {
   if (!query) throw new Error("query is required");
   const count = Math.max(1, Math.min(Number(args?.count) || 5, 10));
   const expandQuery = args?.expand_query === undefined ? true : Boolean(args?.expand_query);
-  const strictRelevance = args?.strict_relevance === undefined ? true : Boolean(args?.strict_relevance);
+  const strictRelevance = args?.strict_relevance === undefined ? false : Boolean(args?.strict_relevance);
   const rerank = Boolean(args?.rerank);
   const resolveRedirects = Boolean(args?.resolve_redirects);
   const browserMode = normalizeBrowserMode(args?.browser);
@@ -1943,6 +2025,7 @@ async function searchWebFocused(args) {
   if (rerank) notes.push("rerank: enabled (heuristic result ordering)");
   if (resolveRedirects) notes.push("resolve_redirects: enabled");
   let rows = [];
+  const batches = [];
   if (browserMode !== "always") {
     const providers = activeProviderOrder(query, args?.providers, notes);
     for (const q of queries) {
@@ -1952,19 +2035,22 @@ async function searchWebFocused(args) {
           const usable = strictRelevance ? filterRelevantRows(raw, query, true) : raw;
           if (strictRelevance && raw.length && !usable.length) notes.push(provider + ": ignored " + raw.length + " low-relevance result(s)");
           if (usable.length) notes.push(provider + ": " + usable.length + " result(s) for " + JSON.stringify(q));
-          rows = dedupe(rows.concat(usable));
+          addResultBatch(batches, provider, usable);
         } catch (error) {
           notes.push(provider + ": " + error.message);
         }
       }
     }
+    rows = interleaveResultBatches(batches);
   }
   if (browserMode === "always" || (browserMode === "auto" && rows.length < count)) {
     const searched = await browserSearchRows(query, candidateCount, args?.browser_engine || "auto", false);
     const usable = strictRelevance ? filterRelevantRows(searched.rows, query, true) : searched.rows;
     notes.push(browserMode === "always" ? "browser search: requested" : "browser fallback: focused HTTP results were insufficient", ...searched.notes);
-    rows = dedupe(rows.concat(usable));
+    addResultBatch(batches, "browser", usable);
+    rows = interleaveResultBatches(batches);
   }
+  if (batches.length > 1) notes.push("provider merge: round-robin in configured order; no relevance sorting");
   if (resolveRedirects) rows = await resolveSearchRedirectRows(rows, notes);
   rows = filterDomains(rows, args?.allowed_domains || [], args?.blocked_domains || []);
   if (rerank) rows = rankRows(rows, query);
@@ -2081,10 +2167,14 @@ function looksFeed(text, contentType = "") {
 }
 
 function fetchDiagnostics({ text = "", output = "", status = "", contentType = "", isHtml = false } = {}) {
-  const haystack = normalizeSpace(`${text.slice(0, 12000)} ${output.slice(0, 4000)}`).toLowerCase();
+  const haystack = normalizeSpace(`${text.slice(0, 5000)} ${output.slice(0, 1500)}`).toLowerCase();
   const signals = [];
   const code = Number(status || 0);
   if (Number.isFinite(code) && code >= 400) signals.push(`HTTP ${code}: server returned an error/blocked status; fetched text may be an error page, not the target content.`);
+  const title = htmlTitle(text).toLowerCase();
+  const blockedTitle = /just a moment|access denied|forbidden|verify|captcha|security check|checking your browser|\u9a8c\u8bc1|\u8bbf\u95ee\u53d7\u9650/.test(title);
+  const looksComplete = isHtml && code < 400 && output.trim().length >= 2000 && !blockedTitle;
+  if (looksComplete) return signals;
   if (/captcha|verify you are human|checking if the site connection is secure|cloudflare|access denied|forbidden|security check|unusual traffic|enable javascript|enable cookies|request blocked|akamai|perimeterx|datadome/i.test(haystack)) {
     signals.push("Possible anti-bot, captcha, or security-check page detected; use browser automation or authenticated/API access if this page requires it.");
   }

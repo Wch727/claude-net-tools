@@ -46,7 +46,7 @@ If you do not need a proxy, leave `CLAUDE_NET_PROXY` unset or set it to `direct`
 
 ## Common Tools
 - `net_doctor`: main Claude Code networking diagnostic; configuration-only by default, real search only with `live=true`.
-- `search_web`: basic web search that preserves provider order and leaves intent judgment to the LLM.
+- `search_web`: primary Claude Code web search; when available it queries two independent provider families and merges them round-robin in configured order without relevance reranking.
 - `search_web_focused`: explicit assisted search for noisy results.
 - `scholar_search`: paper search through Crossref, Semantic Scholar, and arXiv.
 - `package_search`: npm, PyPI, and GitHub repository search.
@@ -56,7 +56,7 @@ If you do not need a proxy, leave `CLAUDE_NET_PROXY` unset or set it to `direct`
 
 ## Browser Search (Optional)
 
-`browser_search` and `browser_fetch` use local Playwright to open real search pages and read JavaScript-rendered content. `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`; the default `auto` falls back only when HTTP search returns too few results or a page is blocked/JavaScript-only.
+`browser_search` and `browser_fetch` use local Playwright to open real search pages and read JavaScript-rendered content. `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`; the default `auto` falls back when HTTP search returns too few results, too little independent-source coverage, or a page is blocked/JavaScript-only.
 
 Check and install browser support before first use:
 
@@ -81,3 +81,9 @@ npm test
 ```
 
 `npm test` starts an offline fixture and tests both the Node/curl and Python builds through MCP JSON-RPC. It does not download dependencies.
+
+When a Playwright browser is installed, run the real rendering smoke test too:
+
+```powershell
+npm run test:browser-live
+```

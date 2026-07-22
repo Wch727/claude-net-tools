@@ -1,5 +1,7 @@
 param(
   [string]$Name = "net-tools",
+  [ValidateSet("local", "user", "project")]
+  [string]$Scope = "local",
   [ValidateSet("auto", "node", "python")]
   [string]$Runtime = "auto",
   [string]$Proxy = "",
@@ -57,17 +59,17 @@ if (-not (Test-Path $Entry)) {
 
 if ($Force) {
   Write-Host "Removing existing Claude Code MCP server '$Name' if present..."
-  & claude mcp remove $Name 2>$null | Out-Null
+  & claude mcp remove $Name -s $Scope 2>$null | Out-Null
 }
 
-$argsList = @("mcp", "add", $Name)
+$argsList = @("mcp", "add", "--scope", $Scope, $Name)
 if ($envArgs.Count -gt 0) {
   $argsList += $envArgs
   $argsList += "--"
 }
 $argsList += @($Command, $Entry)
 
-Write-Host "Installing Claude Code MCP server '$Name' with $Runtime runtime..."
+Write-Host "Installing Claude Code MCP server '$Name' in $Scope scope with $Runtime runtime..."
 Write-Host "claude $($argsList -join ' ')"
 & claude @argsList
 

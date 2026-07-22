@@ -44,15 +44,16 @@ Use net-tools session_clear for session demo.
 ```powershell
 npm run check
 npm test
+npm run test:browser-live
 ```
 
 `npm run check` checks Node syntax and compiles the Python build. `npm test` starts a local offline fixture and tests both builds through MCP JSON-RPC, covering:
 
 - Tool list and schema parity.
 - `net_doctor` configuration-only diagnostics without paid API calls.
-- `fetch_url` paging and link extraction.
+- `fetch_url` paging/link extraction plus protection against false blocked-page diagnostics when complete articles contain ordinary phrases such as “security check.”
 - `session_create/session_status/session_clear` plus session headers/cookies/referer.
 - `search_status` provider diagnostics.
 - arXiv HTTP 429 cooldown without repeated requests.
 
-It does not download dependencies.
+`npm test` does not download dependencies. `npm run test:browser-live` requires an installed Playwright browser and uses a local JavaScript-rendered page to test `browser_fetch` and automatic fallback in both Node and Python builds.

@@ -11,8 +11,8 @@
 
 ## Search Tools
 
-- `search_web`: basic web search. It handles provider fallback, deduplication, and domain filters; it does not expand queries, apply strict relevance filtering, rerank results, or actively probe redirect final URLs. Let the LLM write the query first.
-- `search_web_focused`: explicit assisted search with cleaned core-query expansion, strict relevance filtering, optional reranking, and optional redirect resolution.
+- `search_web`: primary Claude Code web search. When available, it queries two independent provider families, deduplicates results, and merges them round-robin in configured order; it does not expand queries, apply strict relevance filtering, rerank results, or actively probe redirect final URLs. Let the LLM write the query first.
+- `search_web_focused`: explicit assisted search with cleaned core-query expansion plus optional strict relevance filtering, reranking, and redirect resolution. These filtering options are off by default.
 - `scholar_search`: paper search through Crossref, Semantic Scholar, and arXiv. arXiv is later in the default order and enters cooldown after HTTP 429.
 - `package_search`: package and repository search through npm, PyPI, and GitHub repositories.
 
@@ -66,7 +66,7 @@ Rules:
 - `browser_status`: shows the Playwright command, default engine, cache, and profile; `live=true` opens a real page for diagnosis.
 - `browser_search`: opens a real Google, Bing, or DuckDuckGo results page, executes JavaScript, and extracts titles, links, and snippets in page order without reranking.
 - `browser_fetch`: opens a target URL and returns rendered body text and links with `max_chars`, `offset`, and `next_offset` paging.
-- `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`. `auto` falls back only for insufficient results, HTTP failure, anti-bot pages, or JavaScript-only shells.
+- `search_web`, `search_web_focused`, and `fetch_url` accept `browser=never|auto|always`. `auto` falls back for insufficient results, insufficient independent source coverage, HTTP failure, anti-bot pages, or JavaScript-only shells.
 
 The browser session is reused for the MCP process lifetime. Set `CLAUDE_NET_BROWSER_PROFILE` to a dedicated persistent profile for browser cookies and login state. It is separate from the HTTP cookie jar managed by `session_create`.
 

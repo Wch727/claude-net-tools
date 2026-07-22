@@ -44,15 +44,16 @@ Use net-tools session_clear for session demo.
 ```powershell
 npm run check
 npm test
+npm run test:browser-live
 ```
 
 `npm run check` 会检查 Node 版语法，并编译检查 Python 版。`npm test` 会在本地启动离线 fixture，分别通过 MCP JSON-RPC 烟测 Node/curl 版和 Python 版，覆盖：
 
 - 工具列表和 schema parity。
 - `net_doctor` 配置诊断，默认不调用付费 API。
-- `fetch_url` 分页和链接提取。
+- `fetch_url` 分页、链接提取，以及完整正文包含“security check”等普通词语时不误判为拦截页。
 - `session_create/session_status/session_clear` 以及 session headers/cookies/referer。
 - `search_status` provider 诊断。
 - arXiv 429 冷却，不继续连发请求。
 
-默认不下载依赖。
+`npm test` 默认不下载依赖。`npm run test:browser-live` 需要已安装 Playwright 浏览器，会用本地 JavaScript 动态页面真实烟测 Node 和 Python 两个版本的 `browser_fetch` 及自动回退。

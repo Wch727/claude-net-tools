@@ -195,6 +195,11 @@ async function runRuntime(label, command, args, baseUrl, arxivHitCounter) {
     const blockedWithBrowser = await client.callTool("fetch_url", { url: baseUrl + "/blocked", extract: "readable", max_chars: 800, browser: "auto" });
     assertIncludes(blockedWithBrowser, "Rendered fixture body from Playwright", label + " fetch browser fallback");
     assertIncludes(blockedWithBrowser, "Browser fallback reason:", label + " fetch browser fallback");
+    const completeArticle = await client.callTool("fetch_url", { url: baseUrl + "/complete-article", extract: "readable", max_chars: 800, browser: "auto" });
+    assertIncludes(completeArticle, "Security check is discussed as ordinary article content", label + " complete article");
+    assert.ok(!completeArticle.includes("Fetch diagnostics:"), label + " complete article should not be flagged as blocked");
+    assert.ok(!completeArticle.includes("Browser fallback reason:"), label + " complete article should not trigger browser fallback");
+    assert.ok(!completeArticle.includes("Rendered fixture body from Playwright"), label + " complete article should keep HTTP content");
 
     const linksPage = await client.callTool("fetch_url", { url: `${baseUrl}/links`, extract: "readable", include_links: true, link_limit: 5 });
     assertIncludes(linksPage, "https://example.com/target", `${label} ddg relative redirect link`);
@@ -250,6 +255,11 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/blocked") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><html><head><title>Just a moment...</title><script>window.__cf=true</script></head><body>Checking if the site connection is secure. Enable JavaScript and cookies to continue. Cloudflare captcha security check.</body></html>");
+    return;
+  }
+  if (url.pathname === "/complete-article") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end("<!doctype html><html><head><title>Complete Article</title></head><body><article><h1>Complete Article</h1><p>Security check is discussed as ordinary article content. " + longText + "</p></article></body></html>");
     return;
   }
   if (url.pathname === "/links") {

@@ -42,10 +42,13 @@ macOS/Linux：
 .\scripts\install-claude-code.ps1 -Proxy direct
 .\scripts\install-claude-code.ps1 -Providers bing_rss,duckduckgo,bing_html
 .\scripts\install-claude-code.ps1 -Runtime python
+.\scripts\install-claude-code.ps1 -Scope user
 .\scripts\install-claude-code.ps1 -Force
 ```
 
-脚本只负责把 MCP server 注册到 Claude Code，不安装依赖，也不会写入 API key。移动仓库路径、切换 runtime、修改网络出口或 provider 环境变量后，重新运行即可。
+脚本只负责把 MCP server 注册到 Claude Code，不安装依赖，也不会写入 API key。默认写入 `local` scope，可用 `-Scope local|user|project` 明确选择。移动仓库路径、切换 runtime、修改网络出口或 provider 环境变量后，重新运行即可。
+
+同名 `net-tools` 不要同时注册在多个 scope。若 `claude mcp list` 报 `Conflicting scopes`，先决定保留哪一项，再删除另一项，例如 `claude mcp remove net-tools -s user` 或 `claude mcp remove net-tools -s project`；安装脚本不会擅自删除其他 scope 的配置。
 
 ## MCP 配置示例
 

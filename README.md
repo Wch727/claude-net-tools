@@ -46,7 +46,7 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 
 ## 常用工具
 - `net_doctor`：Claude Code 联网总诊断，默认只检查配置，`live=true` 才实际搜索。
-- `search_web`：基础网页搜索，保持 provider 顺序，不替 LLM 理解问题。
+- `search_web`：Claude Code 的基础网页搜索；可用时查询两个独立 provider 家族，按配置顺序轮询合并，不打分重排，也不替 LLM 理解问题。
 - `search_web_focused`：显式增强搜索，仅在基础搜索太吵时使用。
 - `scholar_search`：论文搜索，支持 Crossref、Semantic Scholar、arXiv。
 - `package_search`：npm、PyPI、GitHub repository 搜索。
@@ -56,7 +56,7 @@ claude mcp add net-tools-py python C:\path\to\claude-code-net-tools\claude_net_m
 
 ## 浏览器搜索（可选）
 
-`browser_search` 和 `browser_fetch` 通过本机 Playwright 打开真实搜索页并读取 JavaScript 渲染后的内容。`search_web`、`search_web_focused` 和 `fetch_url` 支持 `browser=never|auto|always`；默认 `auto` 只在普通 HTTP 搜索结果不足或网页被拦截/只有 JS 空壳时回退。
+`browser_search` 和 `browser_fetch` 通过本机 Playwright 打开真实搜索页并读取 JavaScript 渲染后的内容。`search_web`、`search_web_focused` 和 `fetch_url` 支持 `browser=never|auto|always`；默认 `auto` 在普通 HTTP 搜索结果不足、独立来源不足，或网页被拦截/只有 JS 空壳时回退。
 
 首次使用浏览器功能前检查并安装：
 
@@ -81,3 +81,9 @@ npm test
 ```
 
 `npm test` 会离线启动 fixture，并通过 MCP JSON-RPC 同时测试 Node/curl 版和 Python 版，不下载依赖。
+
+已安装 Playwright 浏览器时，可再运行真实渲染烟测：
+
+```powershell
+npm run test:browser-live
+```

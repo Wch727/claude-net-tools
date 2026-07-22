@@ -11,8 +11,8 @@
 
 ## 搜索工具
 
-- `search_web`：基础网页搜索。默认只做 provider 失败降级、去重和域名过滤；不扩写 query、不做严格相关性过滤、不启发式重排、不主动探测跳转最终 URL。让 LLM 先写好 query，再用它拿材料。
-- `search_web_focused`：显式增强网页搜索。支持 cleaned core query 扩展、严格相关性过滤、可选重排和可选跳转解析；适合基础搜索太吵时再用。
+- `search_web`：Claude Code 的基础网页搜索。可用时查询两个独立 provider 家族，去重后按配置顺序轮询合并；不扩写 query、不做严格相关性过滤、不启发式重排、不主动探测跳转最终 URL。让 LLM 先写好 query，再用它拿材料。
+- `search_web_focused`：显式增强网页搜索。支持 cleaned core query 扩展，以及可选的严格相关性过滤、重排和跳转解析；这些筛选默认关闭，适合基础搜索太吵时再按需启用。
 - `scholar_search`：论文搜索，支持 Crossref、Semantic Scholar、arXiv。默认把 arXiv 放后面，并在遇到 429 时冷却。
 - `package_search`：开发包和仓库搜索，支持 npm、PyPI、GitHub repositories。
 
@@ -66,7 +66,7 @@
 - `browser_status`：显示 Playwright 命令、默认引擎、缓存、profile，并可用 `live=true` 打开真实网页诊断。
 - `browser_search`：打开 Google、Bing 或 DuckDuckGo 的真实搜索页，执行 JavaScript 后按页面原顺序提取标题、链接和摘要，不打分重排。
 - `browser_fetch`：打开目标 URL，读取渲染后的正文和链接，支持 `max_chars`、`offset` 和 `next_offset` 分段读取。
-- `search_web`、`search_web_focused`、`fetch_url` 的 `browser` 参数支持 `never|auto|always`。`auto` 只在结果不足、HTTP 失败、反爬页或 JavaScript 空壳时回退。
+- `search_web`、`search_web_focused`、`fetch_url` 的 `browser` 参数支持 `never|auto|always`。`auto` 在结果不足、独立来源不足、HTTP 失败、反爬页或 JavaScript 空壳时回退。
 
 浏览器 session 在 MCP 进程内复用。设置 `CLAUDE_NET_BROWSER_PROFILE` 可使用专用持久化 profile 保存浏览器 cookie 和登录状态；它与 `session_create` 的 HTTP cookie jar 相互独立。
 

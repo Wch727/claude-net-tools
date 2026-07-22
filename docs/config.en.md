@@ -42,10 +42,13 @@ Common options:
 .\scripts\install-claude-code.ps1 -Proxy direct
 .\scripts\install-claude-code.ps1 -Providers bing_rss,duckduckgo,bing_html
 .\scripts\install-claude-code.ps1 -Runtime python
+.\scripts\install-claude-code.ps1 -Scope user
 .\scripts\install-claude-code.ps1 -Force
 ```
 
-The script only registers the MCP server with Claude Code. It does not install dependencies or write API keys. Re-run it after moving the repository path, changing runtime, or changing route/provider environment variables.
+The script only registers the MCP server with Claude Code. It does not install dependencies or write API keys. It writes to the `local` scope by default; use `-Scope local|user|project` to choose explicitly. Re-run it after moving the repository path, changing runtime, or changing route/provider environment variables.
+
+Do not register the same `net-tools` name in multiple scopes. If `claude mcp list` reports `Conflicting scopes`, decide which entry to keep and remove the other, for example with `claude mcp remove net-tools -s user` or `claude mcp remove net-tools -s project`. The installer never removes configurations from other scopes automatically.
 
 ## MCP Config Example
 

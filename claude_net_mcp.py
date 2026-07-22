@@ -29,7 +29,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 SERVER_NAME = "claude-code-net-tools"
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.8.1"
 DEFAULT_TIMEOUT = float(os.environ.get("CLAUDE_NET_TIMEOUT", "20"))
 SEARCH_TIMEOUT = float(os.environ.get("CLAUDE_NET_SEARCH_TIMEOUT", "15"))
 MAX_FETCH_BYTES = int(os.environ.get("CLAUDE_NET_MAX_FETCH_BYTES", "900000"))
@@ -726,6 +726,49 @@ def _dedupe(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return out
 
 
+def _provider_family(provider: Any) -> str:
+    name = _normalize_provider_name(provider)
+    if name.startswith("bing_"):
+        return "bing"
+    return "browser" if name.startswith("browser") else name
+
+
+def _add_result_batch(batches: list[dict[str, Any]], provider: str, rows: list[dict[str, str]]) -> int:
+    existing_urls = {row["url"].split("#", 1)[0] for batch in batches for row in batch["rows"]}
+    unique = [row for row in _dedupe(rows) if row["url"].split("#", 1)[0] not in existing_urls]
+    if not unique:
+        return 0
+    current = next((batch for batch in batches if batch["provider"] == provider), None)
+    if current:
+        current["rows"].extend(unique)
+    else:
+        batches.append({"provider": provider, "rows": unique})
+    return len(unique)
+
+
+def _interleave_result_batches(batches: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    max_length = max((len(batch["rows"]) for batch in batches), default=0)
+    for index in range(max_length):
+        for batch in batches:
+            if index >= len(batch["rows"]):
+                continue
+            row = batch["rows"][index]
+            key = row["url"].split("#", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+            if limit is not None and len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _useful_provider_family_count(batches: list[dict[str, Any]]) -> int:
+    return len({_provider_family(batch["provider"]) for batch in batches if batch["rows"]})
+
+
 def _rank_rows(rows: list[dict[str, str]], query: str) -> list[dict[str, str]]:
     core = _core_query(query).lower()
     ranked = []
@@ -1088,10 +1131,12 @@ def _run_playwright(args: list[str], parse_result: bool = False, timeout: float 
         stderr = getattr(exc, "stderr", "") or ""
         stdout = getattr(exc, "stdout", "") or ""
         detail = " | ".join(part for part in [str(exc), stderr, stdout] if part)[:1200]
+        install_hint = (
+            ". Install it with: npx --yes --package @playwright/cli playwright-cli install-browser"
+            if re.search(r"ENOENT|not found|not recognized|cannot find|missing executable|browser.*not installed", detail, flags=re.I) else ""
+        )
         raise RuntimeError(
-            "Playwright CLI failed: "
-            + detail
-            + ". Install it with: npx --yes --package @playwright/cli playwright-cli install-browser"
+            "Playwright CLI failed: " + detail + install_hint
         ) from exc
 
 
@@ -1127,7 +1172,39 @@ def _browser_navigate(url: str) -> None:
 
 
 def _browser_evaluate(source: str) -> Any:
-    return _run_playwright(["-s=" + BROWSER_SESSION, "eval", source], parse_result=True)
+    os.makedirs(BROWSER_WORK_DIR, exist_ok=True)
+    script_path = os.path.join(BROWSER_WORK_DIR, f"evaluate-{os.getpid()}-{time.time_ns()}.js")
+    run_code = "async page => await page.evaluate(" + source + ")"
+    try:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write(run_code)
+        return _run_playwright(["-s=" + BROWSER_SESSION, "run-code", "--filename=" + script_path], parse_result=True)
+    except Exception as exc:
+        compact_source = re.sub(r"\s+", " ", source[:700])
+        raise RuntimeError(str(exc) + " | Eval source: " + compact_source) from exc
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+
+def _browser_function_source(source: str, bindings: dict[str, Any]) -> str:
+    start = source.find("{")
+    end = source.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Could not serialize browser evaluation function")
+    declarations = []
+    for name, value in bindings.items():
+        if not re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*$", name):
+            raise ValueError("Invalid browser binding: " + name)
+        declarations.append("const " + name + " = " + json.dumps(value, ensure_ascii=False) + ";")
+    return "() => {\n" + "\n".join(declarations) + "\n" + source[start + 1 : end].strip() + "\n}"
+
+
+def _global_browser_failure(exc: Exception) -> bool:
+    return bool(re.search(
+        r"SyntaxError|spawn |ENOENT|not found|not recognized|cannot find|missing executable|browser.*not installed", str(exc), flags=re.I
+    ))
 
 
 _BROWSER_SEARCH_JS = r"""
@@ -1258,7 +1335,7 @@ def _browser_search_rows(query: str, count: int, engine_value: Any = "auto", ref
     for engine in engines:
         try:
             _browser_navigate(_browser_search_url(engine, query, count))
-            data = _browser_evaluate(f"({_BROWSER_SEARCH_JS})({json.dumps(count)})")
+            data = _browser_evaluate(_browser_function_source(_BROWSER_SEARCH_JS, {"limit": count}))
             rows = [
                 _result(row.get("title"), _clean_url(row.get("url")), row.get("snippet", ""), "browser:" + engine)
                 for row in (data or {}).get("rows", [])
@@ -1272,6 +1349,8 @@ def _browser_search_rows(query: str, count: int, engine_value: Any = "auto", ref
                 return value
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{engine}: {exc}")
+            if _global_browser_failure(exc):
+                break
     return {"rows": [], "notes": notes, "engine": ""}
 
 
@@ -1311,7 +1390,7 @@ def browser_fetch(arguments: dict[str, Any]) -> str:
         "sameDomain": bool(arguments.get("same_domain_links")),
         "extract": extract,
     }
-    data = _browser_evaluate(f"({_BROWSER_FETCH_JS})({json.dumps(options, ensure_ascii=False)})")
+    data = _browser_evaluate(_browser_function_source(_BROWSER_FETCH_JS, {"options": options}))
     lines = [
         "URL: " + str(data.get("finalUrl") or url),
         "Route: browser:playwright",
@@ -1844,25 +1923,36 @@ def search_web(arguments: dict[str, Any]) -> str:
         "browser: " + browser_mode,
     ]
     rows: list[dict[str, str]] = []
+    batches: list[dict[str, Any]] = []
     if browser_mode == "always":
         searched = _browser_search_rows(query, count, arguments.get("browser_engine", "auto"), False)
         notes.extend(searched["notes"])
         rows = searched["rows"]
     else:
         providers = _active_provider_order(query, arguments.get("providers"), notes)
+        expected_families = min(2, len({_provider_family(provider) for provider in providers}))
         for provider in providers:
-            if len(rows) >= count:
-                break
             try:
-                raw = _run_provider_tracked(provider, query, max(1, count - len(rows)))
+                raw = _run_provider_tracked(provider, query, count)
+                added = _add_result_batch(batches, provider, raw)
                 notes.append(f"{provider}: {len(raw)} result(s) for {query!r}")
-                rows = _dedupe(rows + raw)
+                if raw and not added:
+                    notes.append(f"{provider}: results duplicated earlier providers")
+                preview = _interleave_result_batches(batches, count)
+                if len(preview) >= count and _useful_provider_family_count(batches) >= expected_families:
+                    break
             except Exception as exc:  # noqa: BLE001
                 notes.append(f"{provider}: {exc}")
-        if browser_mode == "auto" and len(rows) < count:
+        rows = _interleave_result_batches(batches)
+        insufficient_families = _useful_provider_family_count(batches) < expected_families
+        if browser_mode == "auto" and (len(rows) < count or insufficient_families):
             searched = _browser_search_rows(query, count, arguments.get("browser_engine", "auto"), False)
-            notes.extend([f"browser fallback: HTTP providers returned only {len(rows)} result(s)", *searched["notes"]])
-            rows = _dedupe(rows + searched["rows"])
+            reason = (
+                f"HTTP providers returned only {len(rows)} distinct result(s)"
+                if len(rows) < count else "HTTP providers returned results from too few independent source families"
+            )
+            notes.extend(["browser fallback: " + reason, *searched["notes"]])
+            _add_result_batch(batches, "browser", searched["rows"])
     rows = _filter_domains(
         _dedupe(rows),
         [str(value) for value in arguments.get("allowed_domains", [])],
@@ -1879,7 +1969,7 @@ def search_web_focused(arguments: dict[str, Any]) -> str:
         raise ValueError("query is required")
     count = max(1, min(int(arguments.get("count", 5)), 10))
     expand_query = True if "expand_query" not in arguments else _as_bool(arguments.get("expand_query"))
-    strict_relevance = True if "strict_relevance" not in arguments else _as_bool(arguments.get("strict_relevance"))
+    strict_relevance = False if "strict_relevance" not in arguments else _as_bool(arguments.get("strict_relevance"))
     rerank = _as_bool(arguments.get("rerank"))
     resolve_redirects = _as_bool(arguments.get("resolve_redirects"))
     browser_mode = _normalize_browser_mode(arguments.get("browser"))
@@ -1898,6 +1988,7 @@ def search_web_focused(arguments: dict[str, Any]) -> str:
     if resolve_redirects:
         notes.append("resolve_redirects: enabled")
     rows: list[dict[str, str]] = []
+    batches: list[dict[str, Any]] = []
     if browser_mode != "always":
         providers = _active_provider_order(query, arguments.get("providers"), notes)
         for current_query in queries:
@@ -1909,9 +2000,10 @@ def search_web_focused(arguments: dict[str, Any]) -> str:
                         notes.append(f"{provider}: ignored {len(raw)} low-relevance result(s)")
                     if usable:
                         notes.append(f"{provider}: {len(usable)} result(s) for {current_query!r}")
-                    rows = _dedupe(rows + usable)
+                    _add_result_batch(batches, provider, usable)
                 except Exception as exc:  # noqa: BLE001
                     notes.append(f"{provider}: {exc}")
+        rows = _interleave_result_batches(batches)
     if browser_mode == "always" or (browser_mode == "auto" and len(rows) < count):
         searched = _browser_search_rows(query, candidate_count, arguments.get("browser_engine", "auto"), False)
         usable = _filter_relevant_results(searched["rows"], query, True) if strict_relevance else searched["rows"]
@@ -1919,7 +2011,10 @@ def search_web_focused(arguments: dict[str, Any]) -> str:
             "browser search: requested" if browser_mode == "always" else "browser fallback: focused HTTP results were insufficient",
             *searched["notes"],
         ])
-        rows = _dedupe(rows + usable)
+        _add_result_batch(batches, "browser", usable)
+        rows = _interleave_result_batches(batches)
+    if len(batches) > 1:
+        notes.append("provider merge: round-robin in configured order; no relevance sorting")
     if resolve_redirects:
         rows = _resolve_search_redirect_rows(rows, notes)
     rows = _filter_domains(
@@ -2145,10 +2240,15 @@ def _parse_feed_entries(text: str, count: int) -> list[dict[str, str]]:
 
 
 def _fetch_diagnostics(text: str, output: str, status: int, content_type: str, is_html: bool) -> list[str]:
-    haystack = _normalize_space((text[:12000] or "") + " " + (output[:4000] or "")).lower()
+    haystack = _normalize_space((text[:5000] or "") + " " + (output[:1500] or "")).lower()
     signals: list[str] = []
     if status and status >= 400:
         signals.append(f"HTTP {status}: server returned an error/blocked status; fetched text may be an error page, not the target content.")
+    title = _html_title(text).lower()
+    blocked_title = bool(re.search(r"just a moment|access denied|forbidden|verify|captcha|security check|checking your browser|\u9a8c\u8bc1|\u8bbf\u95ee\u53d7\u9650", title, flags=re.I))
+    looks_complete = is_html and status < 400 and len(output.strip()) >= 2000 and not blocked_title
+    if looks_complete:
+        return signals
     if re.search(r"captcha|verify you are human|checking if the site connection is secure|cloudflare|access denied|forbidden|security check|unusual traffic|enable javascript|enable cookies|request blocked|akamai|perimeterx|datadome", haystack, flags=re.I):
         signals.append("Possible anti-bot, captcha, or security-check page detected; use browser automation or authenticated/API access if this page requires it.")
     if re.search(r"[验驗]证[码碼]|人机[验驗]证|安全[验驗]证|访问受限|訪問受限|请求被拦截|請開啟|请开启|启用 javascript|啟用 javascript|登录后查看|登入後查看", haystack, flags=re.I):
@@ -2471,12 +2571,12 @@ TOOLS = [
     {"name": "session_clear", "description": "Clear one named HTTP session, or all sessions when all=true.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "all": {"type": "boolean", "default": False}}}},
     {"name": "browser_status", "description": "Show Playwright browser-search configuration and optionally run a real browser smoke test.", "inputSchema": {"type": "object", "properties": {"live": {"type": "boolean", "default": False, "description": "Open example.com and read its rendered title."}}}},
     {"name": "browser_search", "description": "Search through a real Playwright-rendered Google, Bing, or DuckDuckGo page. Preserves page order and does not rerank results.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "engine": {"type": "string", "enum": ["auto", "google", "bing", "duckduckgo"], "default": "auto"}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}, "refresh": {"type": "boolean", "default": False}}, "required": ["query"]}},
-    {"name": "browser_fetch", "description": "Open a URL in Playwright and return rendered text and links. Use for JavaScript pages or HTTP fetch failures.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": MAX_OUTPUT_CHARS, "default": DEFAULT_FETCH_MAX_CHARS}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "include_links": {"type": "boolean", "default": False}, "link_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain_links": {"type": "boolean", "default": False}, "extract": {"type": "string", "enum": ["readable", "text", "html"], "default": "readable"}}, "required": ["url"]}},
-    {"name": "search_web", "description": "Default web search. Executes the exact query, preserves provider order, and does not expand, filter, rerank, or resolve redirects.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}, "browser_engine": {"type": "string", "enum": ["auto", "google", "bing", "duckduckgo"], "default": "auto"}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
-    {"name": "search_web_focused", "description": "Opt-in recovery search for noisy results. Can expand CJK core queries, filter relevance, rerank, and resolve redirects when explicitly requested.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}, "browser_engine": {"type": "string", "enum": ["auto", "google", "bing", "duckduckgo"], "default": "auto"}, "expand_query": {"type": "boolean", "default": True, "description": "For CJK questions, also try a cleaned core query."}, "strict_relevance": {"type": "boolean", "default": True, "description": "Drop results with weak keyword coverage while preserving provider order."}, "rerank": {"type": "boolean", "default": False, "description": "When true, apply heuristic result re-ranking."}, "resolve_redirects": {"type": "boolean", "default": False, "description": "Resolve known search-engine redirect URLs to their final target URLs."}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
+    {"name": "browser_fetch", "description": "Claude Code browser fallback: open a URL in Playwright and return rendered text and links. Use for JavaScript pages or HTTP fetch failures instead of built-in Fetch/WebFetch.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": MAX_OUTPUT_CHARS, "default": DEFAULT_FETCH_MAX_CHARS}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "include_links": {"type": "boolean", "default": False}, "link_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain_links": {"type": "boolean", "default": False}, "extract": {"type": "string", "enum": ["readable", "text", "html"], "default": "readable"}}, "required": ["url"]}},
+    {"name": "search_web", "description": "Primary Claude Code web search. Executes the exact query, queries multiple provider families when available, and round-robin merges them in configured order without relevance sorting, filtering, query expansion, or redirect probing.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}, "browser_engine": {"type": "string", "enum": ["auto", "google", "bing", "duckduckgo"], "default": "auto"}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
+    {"name": "search_web_focused", "description": "Opt-in recovery search for noisy results. Can expand CJK core queries, filter relevance, rerank, and resolve redirects when explicitly requested.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}, "browser_engine": {"type": "string", "enum": ["auto", "google", "bing", "duckduckgo"], "default": "auto"}, "expand_query": {"type": "boolean", "default": True, "description": "For CJK questions, also try a cleaned core query."}, "strict_relevance": {"type": "boolean", "default": False, "description": "Opt in to dropping results with weak keyword coverage while preserving provider order."}, "rerank": {"type": "boolean", "default": False, "description": "When true, apply heuristic result re-ranking."}, "resolve_redirects": {"type": "boolean", "default": False, "description": "Resolve known search-engine redirect URLs to their final target URLs."}, "allowed_domains": {"type": "array", "items": {"type": "string"}}, "blocked_domains": {"type": "array", "items": {"type": "string"}}}, "required": ["query"]}},
     {"name": "scholar_search", "description": "Search academic papers through specialized providers such as Semantic Scholar, Crossref, and arXiv.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "providers": {"type": "array", "items": {"type": "string"}, "description": "semantic_scholar, crossref, arxiv"}}, "required": ["query"]}},
     {"name": "package_search", "description": "Search developer package and repository indexes such as npm, PyPI, and GitHub repositories.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}, "ecosystem": {"type": "string", "enum": ["all", "npm", "pypi", "github"], "default": "all"}, "providers": {"type": "array", "items": {"type": "string"}, "description": "npm, pypi, github"}}, "required": ["query"]}},
-    {"name": "fetch_url", "description": "Fetch one URL and return content. Supports offset paging, links, and optional Playwright fallback.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": MAX_OUTPUT_CHARS, "default": DEFAULT_FETCH_MAX_CHARS, "description": "Maximum extracted characters to return for this page."}, "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Character offset into the extracted content. Use next_offset to continue long pages."}, "max_bytes": {"type": "integer", "minimum": 100000, "maximum": 50000000, "default": MAX_FETCH_BYTES}, "include_links": {"type": "boolean", "default": False}, "link_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain_links": {"type": "boolean", "default": False}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "session": {"type": "string"}, "update_referer": {"type": "boolean", "default": True}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "readable", "text", "markdown", "raw"], "default": "auto"}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}}, "required": ["url"]}},
+    {"name": "fetch_url", "description": "Primary Claude Code URL reader; use instead of built-in Fetch/WebFetch. Returns content with offset paging for long text and optional link extraction in the same call, with Playwright fallback when requested.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": MAX_OUTPUT_CHARS, "default": DEFAULT_FETCH_MAX_CHARS, "description": "Maximum extracted characters to return for this page."}, "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Character offset into the extracted content. Use next_offset to continue long pages."}, "max_bytes": {"type": "integer", "minimum": 100000, "maximum": 50000000, "default": MAX_FETCH_BYTES}, "include_links": {"type": "boolean", "default": False}, "link_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain_links": {"type": "boolean", "default": False}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "session": {"type": "string"}, "update_referer": {"type": "boolean", "default": True}, "body": {"type": "string"}, "extract": {"type": "string", "enum": ["auto", "readable", "text", "markdown", "raw"], "default": "auto"}, "browser": {"type": "string", "enum": ["never", "auto", "always"], "default": DEFAULT_BROWSER_MODE}}, "required": ["url"]}},
     {"name": "extract_links", "description": "Fetch a page and extract normalized links from its HTML.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}, "same_domain": {"type": "boolean", "default": False}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "session": {"type": "string"}, "update_referer": {"type": "boolean", "default": True}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}}, "required": ["url"]}},
     {"name": "fetch_json", "description": "Fetch a JSON endpoint and pretty-print parsed JSON.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 100000, "default": 30000}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "session": {"type": "string"}, "update_referer": {"type": "boolean", "default": True}, "body": {"type": "string"}}, "required": ["url"]}},
     {"name": "fetch_rss", "description": "Fetch an RSS or Atom feed and return feed entries.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}, "timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": DEFAULT_TIMEOUT}, "headers": {"type": "object", "additionalProperties": {"type": "string"}}, "cookies": {"description": "Cookie header string or object of cookie name/value pairs."}, "cookie_jar": {"type": "string"}, "session": {"type": "string"}, "update_referer": {"type": "boolean", "default": True}}, "required": ["url"]}},
